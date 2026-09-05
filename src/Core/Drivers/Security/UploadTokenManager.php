@@ -31,7 +31,7 @@ final class UploadTokenManager
 
     private function ensureIdentifierSafe(string $identifier): void
     {
-        if (!preg_match('/^[A-Za-z0-9]+$/', $identifier)) {
+        if (!preg_match('/^[A-Za-z0-9_-]+$/D', $identifier)) {
             throw new \InvalidArgumentException('Unsafe identifier');
         }
     }

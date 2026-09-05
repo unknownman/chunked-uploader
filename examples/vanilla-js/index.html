@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chunked Uploader</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f7f6; color: #17302c; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    main { width: min(680px, calc(100% - 32px)); background: #fff; border: 1px solid #dbe7e2; border-radius: 16px; padding: 28px; box-shadow: 0 18px 50px #17302c18; }
+    h1 { margin-top: 0; letter-spacing: -0.02em; }
+    #drop-zone { border: 2px dashed #5c9b88; border-radius: 12px; padding: 48px 20px; text-align: center; cursor: pointer; background: #f2faf6; }
+    #drop-zone.dragging { background: #dff2e8; }
+    input[type=file] { display: none; }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+    button { border: 0; border-radius: 8px; padding: 10px 16px; background: #176b55; color: white; cursor: pointer; }
+    button[disabled] { opacity: .45; cursor: not-allowed; }
+    progress { width: 100%; height: 14px; margin-top: 22px; accent-color: #176b55; }
+    #status { min-height: 24px; color: #48635b; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Resumable upload</h1>
+    <div id="drop-zone" role="button" tabindex="0">Drop a file here or choose one</div>
+    <input id="file-input" type="file">
+    <div class="row">
+      <button id="start" disabled>Start upload</button>
+      <button id="pause" disabled>Pause</button>
+      <button id="resume" disabled>Resume</button>
+    </div>
+    <progress id="progress" value="0" max="100"></progress>
+    <p id="status" aria-live="polite">No file selected.</p>
+  </main>
+  <script src="uploader.js"></script>
+  <script>
+    const zone = document.querySelector('#drop-zone');
+    const input = document.querySelector('#file-input');
+    const start = document.querySelector('#start');
+    const pause = document.querySelector('#pause');
+    const resume = document.querySelector('#resume');
+    const progress = document.querySelector('#progress');
+    const status = document.querySelector('#status');
+    let selectedFile;
+    let uploader;
+
+    const select = (file) => {
+      selectedFile = file;
+      start.disabled = !file;
+      status.textContent = file ? `${file.name} (${file.size} bytes)` : 'No file selected.';
+    };
+    zone.addEventListener('click', () => input.click());
+    zone.addEventListener('keydown', (event) => { if (event.key === 'Enter') input.click(); });
+    input.addEventListener('change', () => select(input.files[0]));
+    zone.addEventListener('dragover', (event) => { event.preventDefault(); zone.classList.add('dragging'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragging'));
+    zone.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('dragging'); select(event.dataTransfer.files[0]); });
+    start.addEventListener('click', async () => {
+      uploader = new ChunkedUploader({
+        file: selectedFile,
+        endpoint: '/upload',
+        token: document.querySelector('meta[name="upload-token"]')?.content || '',
+        onProgress: (value) => { progress.value = value; status.textContent = `Uploading ${Math.round(value)}%`; },
+        onSuccess: () => { status.textContent = 'Upload complete.'; pause.disabled = true; resume.disabled = true; },
+        onError: (error) => { status.textContent = error.message; },
+      });
+      pause.disabled = false;
+      resume.disabled = true;
+      await uploader.start();
+    });
+    pause.addEventListener('click', () => { uploader?.pause(); pause.disabled = true; resume.disabled = false; status.textContent = 'Paused.'; });
+    resume.addEventListener('click', () => { uploader?.resume(); pause.disabled = false; resume.disabled = true; });
+  </script>
+</body>
+</html>

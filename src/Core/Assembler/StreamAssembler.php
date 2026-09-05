@@ -58,7 +58,9 @@ final class StreamAssembler implements FileAssemblerInterface
                         throw new AssemblyException('Chunk stream is not a valid resource for index ' . $i);
                     }
 
-                    $copied = stream_copy_to_stream($in, $out, self::BUFFER);
+                    stream_set_chunk_size($in, self::BUFFER);
+                    stream_set_chunk_size($out, self::BUFFER);
+                    $copied = stream_copy_to_stream($in, $out);
                     if ($copied === false) {
                         throw new AssemblyException('Failed to copy chunk ' . $i . ' to final file');
                     }
