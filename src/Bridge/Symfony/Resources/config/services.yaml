@@ -1,0 +1,33 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        public: false
+
+    Resumable\ChunkedUploader\Core\Configuration\UploaderConfig:
+        arguments:
+            $maxChunkSize: '%chunk_uploader.max_chunk_size%'
+            $maxFileSize: '%chunk_uploader.max_file_size%'
+            $maxChunks: '%chunk_uploader.max_chunks%'
+            $allowedMimeTypes: '%chunk_uploader.allowed_mime_types%'
+            $spoolDirectory: '%chunk_uploader.spool_directory%'
+            $garbageCollectionTtl: '%chunk_uploader.garbage_collection_ttl%'
+
+    Resumable\ChunkedUploader\Core\Security\PathSanitizer: ~
+
+    Resumable\ChunkedUploader\Core\Security\MagicByteValidator: ~
+
+    Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface:
+        alias: Resumable\ChunkedUploader\Core\Security\MagicByteValidator
+
+    Resumable\ChunkedUploader\Core\Contracts\AssemblerInterface:
+        alias: Resumable\ChunkedUploader\Core\Assembler\StreamAssembler
+
+    Resumable\ChunkedUploader\Core\Assembler\StreamAssembler: ~
+
+    Resumable\ChunkedUploader\Bridge\Symfony\Events\SymfonyEventDispatcher: ~
+
+    Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface:
+        alias: Resumable\ChunkedUploader\Bridge\Symfony\Events\SymfonyEventDispatcher
+
+    Resumable\ChunkedUploader\Core\ChunkUploader: ~

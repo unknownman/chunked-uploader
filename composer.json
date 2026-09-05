@@ -1,0 +1,55 @@
+{
+    "name": "resumable/chunked-uploader",
+    "description": "Enterprise-grade, framework-agnostic PHP library for handling large file uploads via chunking with stream-based assembly, resume capability, and cryptographic integrity checks.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "chunked-upload",
+        "resumable-upload",
+        "file-upload",
+        "streams",
+        "php"
+    ],
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "psr/event-dispatcher": "^1.0",
+        "psr/log": "^3.0"
+    },
+    "require-dev": {
+        "aws/aws-sdk-php": "^3.300",
+        "illuminate/console": "^10.0 || ^11.0",
+        "illuminate/contracts": "^10.0 || ^11.0",
+        "illuminate/support": "^10.0 || ^11.0",
+        "mikey179/vfsstream": "^1.6",
+        "phpunit/phpunit": "^10.5 || ^11.0",
+        "predis/predis": "^2.0",
+        "symfony/config": "^6.0 || ^7.0",
+        "symfony/dependency-injection": "^6.0 || ^7.0",
+        "symfony/http-kernel": "^6.0 || ^7.0",
+        "squizlabs/php_codesniffer": "^3.10",
+        "phpstan/phpstan": "^1.12"
+    },
+    "suggest": {
+        "ext-redis": "Required for RedisMetadataRepository with native Redis client.",
+        "predis/predis": "Alternative Redis client for RedisMetadataRepository.",
+        "ext-pdo": "Required for PdoMetadataRepository.",
+        "aws/aws-sdk-php": "Required for S3StorageDriver.",
+        "league/flysystem": "Required for optional Flysystem storage bridge."
+    },
+    "autoload": {
+        "psr-4": {
+            "Resumable\\ChunkedUploader\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Resumable\\ChunkedUploader\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
