@@ -69,4 +69,21 @@ interface MetadataRepositoryInterface
      * @throws MetadataException when the datastore connection or update fails
      */
     public function markChunkAsUploaded(string $identifier, int $chunkIndex): UploadState;
+
+    /**
+     * Removes stale metadata records that have not been updated within the TTL
+     * window.
+     *
+     * Used by the garbage collector to purge abandoned uploads whose chunks were
+     * never completed. Implementations MUST be idempotent and MUST NOT raise an
+     * error when there are no expired records.
+     *
+     * @param int $ttlSeconds Maximum age, in seconds, of a record before it is
+     *                        considered expired and removed
+     *
+     * @return int Number of expired records that were removed
+     *
+     * @throws MetadataException when the datastore connection or delete fails
+     */
+    public function cleanExpired(int $ttlSeconds): int;
 }

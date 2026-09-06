@@ -61,4 +61,18 @@ interface UploadManagerInterface
      * @throws UploadFailedException when cleanup of chunks or state fails
      */
     public function cancelUpload(string $identifier): void;
+
+    /**
+     * Reads the current persisted state of an upload without mutating anything.
+     *
+     * Useful for resumability endpoints that only need to report progress or
+     * missing chunk indices. MUST be a pure read: it MUST NOT create, advance,
+     * or delete any state.
+     *
+     * @param string $identifier The upload identifier to read
+     *
+     * @return UploadState|null The current persisted state, or null when none
+     *                          exists for the given identifier
+     */
+    public function getStatus(string $identifier): ?UploadState;
 }

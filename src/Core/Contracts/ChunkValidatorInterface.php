@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// File: src/Core/Contracts/ValidatorInterface.php
+// File: src/Core/Contracts/ChunkValidatorInterface.php
 
 namespace Resumable\ChunkedUploader\Core\Contracts;
 
@@ -20,14 +20,14 @@ use Resumable\ChunkedUploader\Core\Models\Chunk;
  * SHA-256 checksum is recomputed over the actual bytes, and identifiers and
  * filenames are screened for directory traversal payloads.
  */
-interface ValidatorInterface
+interface ChunkValidatorInterface
 {
     /**
      * Validates a single chunk and halts processing on any violation.
      *
-    * A failed validation MUST throw immediately so the request short-circuits
-    * before a single byte is written to disk. On success the method returns
-    * true, signaling that the chunk is fit to be persisted and processed.
+     * A failed validation MUST throw immediately so the request short-circuits
+     * before a single byte is written to disk. On success the method returns
+     * true, signaling that the chunk is fit to be persisted and processed.
      *
      * @param Chunk $chunk Immutable DTO describing the chunk to inspect
      *

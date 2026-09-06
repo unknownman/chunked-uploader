@@ -71,4 +71,22 @@ interface ChunkStorageInterface
      * @throws StorageException when one or more artifacts cannot be removed
      */
     public function deleteChunks(string $identifier): void;
+
+    /**
+     * Removes chunk artifacts that have not been touched within the TTL window.
+     *
+     * Used by the garbage collector to reclaim orphaned or abandoned upload
+     * artifacts. The concrete driver decides how to measure staleness (e.g. the
+     * file modified time of an upload's directory). Implementations MUST be
+     * length-safe on the returned count and MUST NOT raise an error when there
+     * is nothing to clean.
+     *
+     * @param int $ttlSeconds Maximum age, in seconds, before an artifact is
+     *                        considered orphaned and eligible for removal
+     *
+     * @return int Number of orphaned chunk artifacts that were removed
+     *
+     * @throws StorageException when one or more artifacts cannot be removed
+     */
+    public function cleanOrphanedChunks(int $ttlSeconds): int;
 }
