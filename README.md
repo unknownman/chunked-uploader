@@ -1,29 +1,124 @@
 # Resumable Chunked Uploader
 
-Framework-agnostic PHP 8.2 library for secure, resumable uploads. Chunks are persisted independently, progress is durable, and final assembly uses native PHP streams instead of buffering the complete file.
+[![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-8892BF)](https://www.php.net/releases/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PHPUnit](https://img.shields.io/badge/PHPUnit-10%2B-green.svg)](https://phpunit.de/)
+
+Enterprise-grade, framework-agnostic PHP 8.2 library for handling large file
+uploads via **chunking** with **constant-memory stream assembly**, **resume
+capability**, and **cryptographic integrity checks**.
+
+Chunks are persisted independently, progress is kept in a durable store
+(Redis or a relational database), and the final file is assembled using native
+PHP streams — never buffering the whole file into memory, regardless of how
+large it is.
+
+---
+
+## Table of contents
+
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Core benefits](#core-benefits)
+- [Installation](#installation)
+- [Standalone PHP quickstart](#standalone-php-quickstart)
+- [Framework integration](#framework-integration)
+  - [Laravel 10 / 11](#laravel-10--11)
+  - [Symfony 6 / 7](#symfony-6--7)
+- [Vanilla JavaScript client](#vanilla-javascript-client)
+- [Security model](#security-model)
+- [API reference](#api-reference)
+- [Configuration options](#configuration-options)
+- [Testing](#testing)
+- [License](#license)
+
+---
 
 ## Highlights
 
-- Constant-memory chunk assembly with `fopen()` and stream copying.
-- Resume support for out-of-order chunks and interrupted requests.
-- Atomic Redis progress updates and configurable expiration.
-- HMAC tokens bound to upload metadata and client context.
-- Header-only magic-byte MIME validation and strict path sanitization.
-- Optional ClamAV scanning and Redis rate limiting.
-- No Laravel, Symfony, Redis, S3, or ClamAV dependency in the core package.
+- **O(1) memory** chunk assembly via `fopen()` + `stream_copy_to_stream()`.
+- **Resume support** for out-of-order chunks and interrupted requests.
+- **Atomic** progress updates in Redis (optimistic locking).
+- **HMAC tokens** bound to upload metadata and client context.
+- **Magic-byte MIME validation** (only reads the first 4096 bytes).
+- **Strict path sanitization** against directory traversal.
+- **Optional** ClamAV scanning and Redis rate limiting.
+- **Zero framework dependency** in the core package.
+- **Laravel** and **Symfony** bridges + a **dependency-free vanilla JS** client.
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client --> Manager[UploadManager]
-    Manager --> Validator[ValidationPipeline]
-    Manager --> Chunks[ChunkStorageInterface]
-    Manager --> State[MetadataRepositoryInterface]
-    State --> Redis[(Redis)]
-    Manager --> Assembler[FileAssemblerInterface]
-    Assembler --> Final[Final file]
+    subgraph Client
+        JS[Vanilla JS / Fetch API]
+    end
+
+    subgraph Server
+        M[UploadManager]
+        V[ValidationPipeline]
+        S[ChunkStorageInterface]
+        MD[MetadataRepositoryInterface]
+        PT[ProgressTrackerInterface]
+        A[FileAssemblerInterface]
+        TS[UploadTokenManager]
+    end
+
+    JS -->|POST /upload token| TS
+    JS -->|POST /upload chunks| M
+    M --> V
+    M --> S
+    M --> MD
+    M --> PT
+    M --> A
+    A --> F[Final file]
+    JS -->|GET /upload/status| MD
 ```
+
+Data flow for a single chunk:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as UploadManager
+    participant TS as TokenManager
+    participant MD as MetadataRepo
+    participant S as ChunkStorage
+    participant A as Assembler
+
+    C->>M: processChunk(Chunk{index, token, ...})
+    M->>TS: verifyToken(identifier, token)
+    TS-->>M: valid
+    M->>MD: get(identifier)
+    MD-->>M: UploadState|null
+    M->>S: store(chunk)
+    M->>MD: markChunkAsUploaded(identifier, index)
+    MD-->>M: UploadState (updated)
+    alt isComplete(state)
+        M->>A: assemble(state, storage)
+        A->>S: getChunkStream(index 0..N-1)
+        S-->>A: stream
+        A-->>M: finalPath
+        M->>S: deleteChunks(identifier)
+    end
+    M-->>C: UploadState
+```
+
+---
+
+## Core benefits
+
+| Benefit | How it works |
+| --- | --- |
+| **Low memory** | Assembly streams chunk-by-chunk through a fixed 4 MiB buffer. A 10 GB file needs under 10 MiB of PHP memory. |
+| **Resumable** | Progress persists per-chunk. Any client can query missing indices and resume exactly where it stopped. |
+| **Idempotent** | Re-sending an already-accepted chunk is a no-op — no duplicated bytes, no corruption. |
+| **Secure** | Magic-byte MIME checks, HMAC token verification, traversal-safe paths, and optional ClamAV scanning. |
+| **Out-of-order safe** | Chunks may arrive in any order; assembly only runs when every index is present. |
+
+---
 
 ## Installation
 
@@ -31,9 +126,17 @@ flowchart LR
 composer require resumable/chunked-uploader
 ```
 
-The package requires PHP 8.2 and `ext-json`. Redis can be provided by `ext-redis` or Predis, depending on the adapter used by your application.
+Requirements:
 
-## Standalone PHP
+- PHP **^8.2**
+- `ext-json`
+- One of `ext-redis` **or** `predis/predis` (for the Redis metadata driver)
+- `ext-pdo` (for the PDO metadata driver)
+- `aws/aws-sdk-php` (for the S3 storage driver)
+
+---
+
+## Standalone PHP quickstart
 
 ```php
 <?php
@@ -41,111 +144,247 @@ The package requires PHP 8.2 and `ext-json`. Redis can be provided by `ext-redis
 declare(strict_types=1);
 
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
+use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisProgressTracker;
 use Resumable\ChunkedUploader\Core\Drivers\Security\UploadTokenManager;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\UploadManager;
 
-$storage = new LocalChunkStorage('/var/lib/my-app/upload-chunks');
-$assembler = new StreamAssembler('/var/lib/my-app/files');
+// 1. Wire the infrastructure.
+$storage = new LocalChunkStorage('/var/lib/my-app/chunks');
+$assembler = new StreamAssembler('/var/lib/my-app/final');
+$tracker = new RedisProgressTracker(new \Redis(['host' => '127.0.0.1']));
+
+// 2. Create the manager once, inject it into your request handler.
 $manager = new UploadManager(
     storage: $storage,
-    metadata: $redisTracker,
-    progress: $redisTracker,
+    metadata: $tracker,
+    progress: $tracker,
     assembler: $assembler,
     tokenManager: new UploadTokenManager($_ENV['UPLOAD_TOKEN_SECRET']),
 );
 
+// 3. For each incoming chunk, build a Chunk DTO and process it.
 $state = $manager->processChunk(new Chunk(
     identifier: 'upload_123',
-    token: $token,
+    token: $clientToken,           // from UploadTokenService
     index: 0,
     totalChunks: 4,
-    chunkSize: filesize($temporaryUpload),
-    totalSize: 20_000_000,
-    tmpFilePath: $temporaryUpload,
+    chunkSize: filesize($tempFile), // actual byte size of this chunk
+    totalSize: 20_000_000,          // expected total size
+    tmpFilePath: $tempFile,         // from PHP's upload temp dir
     originalFilename: 'archive.zip',
 ));
+
+// The manager returns the latest upload state; when isCompleted is true the
+// final file has been assembled and temp chunks deleted.
+if ($state->isCompleted) {
+    // finalPath points to the assembled artifact
+    echo $state->finalPath;
+}
 ```
 
-Create one `Chunk` per HTTP request. The `index` is zero-based. Retrying an already accepted index is idempotent.
+Create one `Chunk` per HTTP request. `index` is zero-based. Retrying an
+already-accepted index is safe and idempotent.
 
-## Framework integrations
+---
 
-### Laravel 10 and 11
+## Framework integration
 
-Register the provider from `src/Bridge/Laravel/ChunkUploaderServiceProvider.php`, publish or merge `src/Bridge/Laravel/config/chunk-uploader.php`, and bind the Redis tracker and storage paths in application configuration. The example controller is in [`examples/laravel/ChunkUploadController.php`](examples/laravel/ChunkUploadController.php).
+### Laravel 10 / 11
 
-Typical routes are:
+**1. Register the service provider**
+
+In `bootstrap/providers.php` (Laravel 11) or `config/app.php` (Laravel 10):
 
 ```php
-Route::post('/upload/token', [ChunkUploadController::class, 'issueToken']);
-Route::post('/upload', [ChunkUploadController::class, 'store']);
+// Laravel 11: bootstrap/providers.php
+return [
+    Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider::class,
+];
+
+// Laravel 10: config/app.php
+'providers' => [
+    Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider::class,
+],
+```
+
+**2. Publish configuration (optional)**
+
+```bash
+php artisan vendor:publish --provider="Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider"
+```
+
+Then adjust `config/chunk-uploader.php` (allowed MIME types, spool directory,
+storage driver, etc.).
+
+**3. Use the Facade**
+
+```php
+use Resumable\ChunkedUploader\Bridge\Laravel\Facades\ChunkUploader;
+
+$state = ChunkUploader::processChunk($chunk);
+```
+
+**4. Add routes (see the example controller)**
+
+```php
+Route::post('/upload/token',  [ChunkUploadController::class, 'issueToken']);
+Route::post('/upload',        [ChunkUploadController::class, 'store']);
 Route::get('/upload/status/{identifier}', [ChunkUploadController::class, 'status']);
 ```
 
-### Symfony 6 and 7
+A complete, copy-pasteable controller lives at
+[`examples/laravel/ChunkUploadController.php`](examples/laravel/ChunkUploadController.php).
 
-Register `src/Bridge/Symfony/ChunkUploaderBundle.php`, configure the bundle, and provide the Redis tracker and filesystem directories as services. Attribute-routed controller code is in [`examples/symfony/ChunkUploadController.php`](examples/symfony/ChunkUploadController.php).
+---
+
+### Symfony 6 / 7
+
+**1. Enable the bundle**
+
+```php
+// config/bundles.php
+return [
+    Resumable\ChunkedUploader\Bridge\Symfony\ChunkUploaderBundle::class => ['all' => true],
+];
+```
+
+**2. Configure the bundle**
+
+```yaml
+# config/packages/chunk_uploader.yaml
+chunk_uploader:
+    max_chunk_size: 5242880
+    max_file_size: 104857600
+    max_chunks: 1000
+    allowed_mime_types: []
+    spool_directory: '%kernel.project_dir%/var/chunks'
+    storage:
+        driver: local
+        base_dir: '%kernel.project_dir%/var/storage'
+    metadata:
+        driver: redis
+        dsn: 'redis://localhost:6379'
+```
+
+**3. Add routes via attribute on the controller**
+
+The example at [`examples/symfony/ChunkUploadController.php`](examples/symfony/ChunkUploadController.php)
+uses attribute routing and constructor injection, so no routing YAML is needed.
+
+---
 
 ## Vanilla JavaScript client
 
-The dependency-free client in [`examples/vanilla-js/uploader.js`](examples/vanilla-js/uploader.js) uses `Blob.prototype.slice()`, `fetch()`, `FormData`, exponential retry, pause/resume, and a status endpoint. Copy the example HTML and set the token endpoint integration used by your backend.
+A 100% dependency-free ES6+ client, using `Blob.prototype.slice()`, the Fetch
+API and `FormData`, is included in [`examples/vanilla-js/`](examples/vanilla-js/).
+
+```html
+<script src="uploader.js"></script>
+```
 
 ```js
 const uploader = new ChunkedUploader({
   file,
   endpoint: '/upload',
-  token,
-  onProgress: (percent) => console.log(`${percent}%`),
-  onSuccess: console.log,
-  onError: console.error,
+  chunkSize: 2 * 1024 * 1024,          // 2 MiB
+  token,                                // HMAC token from your backend
+  onProgress: (percent, index, total) => {
+    progressBar.value = percent;
+  },
+  onSuccess: (result) => console.log('Done', result),
+  onError: (error) => console.error(error),
 });
-await uploader.start();
+
+await uploader.start();          // also valid: await uploader.resume()
 ```
+
+Features:
+
+- Splits a `File` into binary chunks with `file.slice(start, end)`.
+- Sends each chunk as `multipart/form-data` via `fetch()`.
+- Automatic retry with **exponential backoff** on transient failures.
+- `pause()` / `resume()` for interactive control.
+- `missingChunks()` queries `GET {endpoint}/status/{id}` so a partially
+  uploaded file resumes instead of restarting.
+- Works in any modern browser with native `fetch`, `FormData`, and `Blob`.
+
+Open [`examples/vanilla-js/index.html`](examples/vanilla-js/index.html) in a
+browser for a ready-to-run drag-and-drop demo.
+
+---
 
 ## Security model
 
-1. **Tokens:** `UploadTokenService` uses HMAC-SHA256 and `hash_equals()`. Bind the salt to an authenticated user, client fingerprint, or IP policy where appropriate.
-2. **Paths:** `PathSanitizer` rejects null bytes, separators, traversal markers, and unsafe identifiers. Never bypass it before constructing filesystem paths.
-3. **MIME:** `MagicByteValidator` reads at most 4096 bytes and uses `finfo` rather than trusting a browser MIME header. Pair it with `ExtensionMimeMatchRule`.
-4. **Malware:** `ClamAvScanner` streams file data to `clamd`; use `NullVirusScanner` only when scanning is handled elsewhere.
-5. **Abuse:** `RedisRateLimiter` can key limits by IP, user, or upload token. Apply limits before accepting chunk bodies when possible.
-6. **Storage:** Keep temporary and final directories outside the public web root, and configure retention and permissions deliberately.
+1. **Tokens** — `UploadTokenService` issues HMAC-SHA256 tokens bound to the
+   upload identifier, chunk count, total size, and an optional client salt
+   (IP / fingerprint). Verification uses `hash_equals()` (constant-time).
+2. **Paths** — `PathSanitizer` rejects null bytes, directory separators,
+   traversal markers (`..`, `../`), and unsafe identifiers. Never build a
+   filesystem path from user input without running it through the sanitizer.
+3. **MIME** — `MagicByteValidator` inspects only the first 4096 bytes via
+   `finfo` and compares against an allow-list. Client-supplied MIME headers
+   are never trusted.
+4. **Extension matching** — `ExtensionMimeMatchRule` rejects files whose
+   claimed extension disagrees with their detected MIME type.
+5. **Malware** — `ClamAvScanner` streams data to `clamd` over the INSTREAM
+   protocol in 1 MiB chunks. Use `NullVirusScanner` when scanning is handled
+   elsewhere.
+6. **Abuse** — `RedisRateLimiter` can key limits per IP, user, or upload token
+   and applies them before accepting chunk bodies.
+7. **Storage** — Keep temporary and final directories outside the public
+   document root, and configure permissions and retention deliberately.
+
+---
 
 ## API reference
 
 ### `UploadManagerInterface`
 
-- `processChunk(Chunk $chunk): UploadState` validates the token, persists the chunk, advances progress atomically, and assembles on completion.
-- `cancelUpload(string $identifier): void` removes chunks and metadata.
-
-### `Chunk`
-
-`identifier`, `token`, `index`, `totalChunks`, `chunkSize`, `totalSize`, `tmpFilePath`, `originalFilename`, and optional `checksum` are immutable constructor properties.
-
-### `UploadState`
-
-Contains `identifier`, `totalChunks`, `totalSize`, `originalFilename`, `uploadedChunks`, `isCompleted`, and `finalPath`.
-
-### Storage and metadata contracts
-
-- `ChunkStorageInterface`: `store`, `getChunkStream`, `deleteChunks`.
-- `MetadataRepositoryInterface`: `save`, `get`, `delete`, `markChunkAsUploaded`.
-- `ProgressTrackerInterface`: `getPercentage`, `isComplete`, `getMissingChunkIndices`.
-- `FileAssemblerInterface`: `assemble(UploadState, ChunkStorageInterface): string`.
-
-## Configuration guidance
-
-| Setting | Guidance |
+| Method | Description |
 | --- | --- |
-| Temporary chunk directory | Private, writable, outside the public document root |
-| Final directory | Private unless downloads are explicitly authorized |
-| Redis TTL | Long enough for the expected upload window, with orphan cleanup |
-| Max chunk size | Match the client chunk size and reverse-proxy body limit |
-| Max total size | Enforce the business and storage quota |
-| Allowed MIME types | Use an explicit allow-list, never a client-provided type |
-| Token secret | High-entropy secret stored outside source control |
+| `processChunk(Chunk $chunk): UploadState` | Validates the token, persists the chunk, advances progress, and assembles when complete. Idempotent and concurrent-safe. |
+| `cancelUpload(string $identifier): void` | Removes chunks and metadata. Idempotent for unknown identifiers. |
+
+### `Chunk` (readonly DTO)
+
+`identifier`, `token`, `index`, `totalChunks`, `chunkSize`, `totalSize`,
+`tmpFilePath`, `originalFilename`, and optional `checksum`.
+
+### `UploadState` (readonly DTO)
+
+`identifier`, `totalChunks`, `totalSize`, `originalFilename`, `uploadedChunks`,
+`isCompleted`, `finalPath`; plus `hasChunk()`, `isComplete()`,
+`withUploadedChunk()`, and `withFinalPath()`.
+
+### Contracts
+
+| Contract | Methods |
+| --- | --- |
+| `ChunkStorageInterface` | `store`, `getChunkStream`, `deleteChunks` |
+| `MetadataRepositoryInterface` | `save`, `get`, `delete`, `markChunkAsUploaded` |
+| `ProgressTrackerInterface` | `getPercentage`, `isComplete`, `getMissingChunkIndices` |
+| `FileAssemblerInterface` | `assemble(UploadState, ChunkStorageInterface): string` |
+| `ValidationRuleInterface` | `validate(Chunk): void` |
+| `ChunkValidatorInterface` | `validate(Chunk): bool` |
+| `VirusScannerInterface` | `scan(string): void` |
+
+---
+
+## Configuration options
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `maxChunkSize` | 5 MiB | Hard limit of a single chunk. |
+| `maxFileSize` | 100 MiB | Hard limit of the assembled file. |
+| `maxChunks` | 1000 | Max chunks per upload (DoS guard). |
+| `allowedMimeTypes` | `[]` | Whitelist; empty = any verified type. |
+| `spoolDirectory` | `/tmp/chunked-uploader` | Chunk + final assembly dir. |
+| `garbageCollectionTtl` | 3600 s | Incomplete-upload window before GC. |
+| `identifierPattern` | `^[a-zA-Z0-9_-]{1,128}$` | Legal identifier pattern. |
+
+---
 
 ## Testing
 
@@ -154,7 +393,16 @@ composer install
 vendor/bin/phpunit
 ```
 
-The test suite uses temporary files and in-memory doubles. It does not require a live Redis server, object store, ClamAV daemon, or framework.
+The full suite runs **completely offline**: all disk I/O uses ephemeral
+temporary files that are cleaned up automatically; storage and metadata are
+in-memory doubles; and Redis, S3, and ClamAV are never contacted. The suite
+covers:
+
+- **Unit tests** against `PathSanitizer`, `MagicByteValidator`,
+  `UploadTokenService`, and `StreamAssembler` (includes a memory ceiling test).
+- **Feature tests** for the full sequential upload flow, out-of-order
+  resumable uploads, and interrupted-upload recovery (idempotent retries,
+  resume-from-missing-index, service-restart continuity).
 
 ## License
 
