@@ -11,8 +11,11 @@ use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\MetadataDriverF
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\StorageDriverFactory;
 use Resumable\ChunkedUploader\Bridge\Symfony\Events\SymfonyEventDispatcher;
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
+use Resumable\ChunkedUploader\Core\Configuration\ChunkedUploadConfigResolver;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkUploaderInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
@@ -49,9 +52,11 @@ return static function (ContainerConfigurator $container): void {
         ->arg('$maxChunks', '%chunk_uploader.max_chunks%')
         ->arg('$allowedMimeTypes', '%chunk_uploader.allowed_mime_types%')
         ->arg('$spoolDirectory', '%chunk_uploader.spool_directory%')
-        ->arg('$garbageCollectionTtl', '%chunk_uploader.garbage_collection_ttl%');
+        ->arg('$garbageCollectionTtl', '%chunk_uploader.garbage_collection_ttl%')
+        ->arg('$tokenSalt', '%chunk_uploader.token_salt%');
 
     $services->set(PathSanitizer::class);
+    $services->set(ChunkedUploadConfigResolver::class);
 
     $services->set(MagicByteValidator::class)
         ->arg('$config', service(UploaderConfig::class));
@@ -84,7 +89,8 @@ return static function (ContainerConfigurator $container): void {
         ]);
 
     $services->set(ChunkValidatorInterface::class, ChunkSecurityValidator::class)
-        ->arg('$tokenSalt', '%chunk_uploader.token_salt%');
+        ->arg('$tokenSalt', '%chunk_uploader.token_salt%')
+        ->arg('$config', service(UploaderConfig::class));
 
     $services->set(StorageDriverFactory::class)
         ->arg('$driver', '%chunk_uploader.storage%')
@@ -110,13 +116,21 @@ return static function (ContainerConfigurator $container): void {
     $services->set(ProgressTrackerInterface::class)
         ->factory([service(MetadataDriverFactory::class), 'createTracker']);
 
+    $services->set(ChunkUploader::class)
+        ->arg('$maxChunkAttempts', '%chunk_uploader.rate_limiting.max_attempts%')
+        ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
+        ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%');
+
+    // Retain the concrete legacy service for applications that explicitly
+    // request UploadManager; all package aliases resolve to ChunkUploader.
     $services->set(UploadManager::class)
         ->arg('$maxChunkAttempts', '%chunk_uploader.rate_limiting.max_attempts%')
         ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
         ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%');
 
-    $services->alias(UploadManagerInterface::class, UploadManager::class);
-    $services->alias('chunk-uploader', UploadManager::class);
+    $services->alias(ChunkUploaderInterface::class, ChunkUploader::class);
+    $services->alias(UploadManagerInterface::class, ChunkUploader::class);
+    $services->alias('chunk-uploader', ChunkUploader::class);
 
     $services->set(GarbageCollector::class);
 

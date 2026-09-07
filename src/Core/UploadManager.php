@@ -15,6 +15,7 @@ use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
+use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Events\ChunkUploadedEvent;
 use Resumable\ChunkedUploader\Core\Events\FileAssembledEvent;
 use Resumable\ChunkedUploader\Core\Events\UploadFailedEvent;
@@ -34,7 +35,10 @@ use Throwable;
  * this class a thin orchestrator that is trivially testable and framework
  * agnostic.
  */
-final class UploadManager implements UploadManagerInterface
+/**
+ * @deprecated Use ChunkUploader as the canonical workflow coordinator.
+ */
+class UploadManager implements UploadManagerInterface
 {
     /**
      * @param RateLimiterInterface|null $rateLimiter     Optional chunk-flood guard keyed by client.
@@ -54,16 +58,22 @@ final class UploadManager implements UploadManagerInterface
         private readonly ?int $maxChunkAttempts = null,
         private readonly int $rateLimitWindow = 60,
         private readonly string $rateLimitKey = 'chunked-uploader:chunks',
+        private readonly UploaderConfig $config = new UploaderConfig(),
     ) {
     }
 
-    public function processChunk(Chunk $chunk): UploadState
+    public function processChunk(Chunk $chunk, ?UploaderConfig $config = null): UploadState
     {
+        $config ??= $this->config;
         $this->enforceRateLimit($chunk);
 
         // Step 1: Validate the chunk before any disk I/O.
         try {
-            $this->validator->validate($chunk);
+            if (method_exists($this->validator, 'validateWithConfig')) {
+                $this->validator->validateWithConfig($chunk, $config);
+            } else {
+                $this->validator->validate($chunk);
+            }
         } catch (Throwable $e) {
             $this->logger?->warning('Chunk validation failed', [
                 'identifier' => $chunk->identifier,

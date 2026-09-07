@@ -20,6 +20,7 @@ final readonly class UploaderConfig
      * @param string               $spoolDirectory      Directory where chunk and final assembly files are spooled
      * @param int                  $garbageCollectionTtl Seconds an incomplete upload may linger before GC reclaims its chunks
      * @param string               $identifierPattern   POSIX ERE pattern identifiers must fully match
+    * @param string               $tokenSalt            Optional endpoint/client token binding salt
      */
     public function __construct(
         public int $maxChunkSize = 5 * 1024 * 1024,
@@ -29,6 +30,32 @@ final readonly class UploaderConfig
         public string $spoolDirectory = '/tmp/chunked-uploader',
         public int $garbageCollectionTtl = 3600,
         public string $identifierPattern = '/^[a-zA-Z0-9_-]{1,128}$/D',
+        public string $tokenSalt = '',
     ) {
+    }
+
+    /**
+     * Returns a validated immutable configuration with endpoint overrides.
+     * Null arguments deliberately inherit the global value.
+     *
+     * @param list<string>|null $allowedMimeTypes
+     */
+    public function withOverrides(
+        ?int $maxFileSize = null,
+        ?int $maxChunkSize = null,
+        ?int $maxChunks = null,
+        ?array $allowedMimeTypes = null,
+        ?string $tokenSalt = null,
+    ): self {
+        return new self(
+            maxChunkSize: $maxChunkSize ?? $this->maxChunkSize,
+            maxFileSize: $maxFileSize ?? $this->maxFileSize,
+            maxChunks: $maxChunks ?? $this->maxChunks,
+            allowedMimeTypes: $allowedMimeTypes ?? $this->allowedMimeTypes,
+            spoolDirectory: $this->spoolDirectory,
+            garbageCollectionTtl: $this->garbageCollectionTtl,
+            identifierPattern: $this->identifierPattern,
+            tokenSalt: $tokenSalt ?? $this->tokenSalt,
+        );
     }
 }

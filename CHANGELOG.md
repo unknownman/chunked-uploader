@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `GuzzleHttp\Psr7\StreamWrapper::getResource()`.
 
 ### Added
+- Canonical `ChunkUploader` and `ChunkUploaderInterface` coordinator names,
+  with deprecated `UploadManager` compatibility aliases.
+- Optional PHP 8 `ChunkedUpload` attributes and
+  `ChunkedUploadConfigResolver` for endpoint-specific limits, MIME allow-lists,
+  and token salts.
+- Optional `FlysystemChunkStorage` for Flysystem v3-compatible filesystem
+  operators, including streamed reads/writes and incremental orphan cleanup.
 - `ChunkSecurityValidator` receives an optional `tokenSalt` for binding tokens
   to a client fingerprint.
 - Laravel config and provider wiring for `token_salt`, `virus_scanning`

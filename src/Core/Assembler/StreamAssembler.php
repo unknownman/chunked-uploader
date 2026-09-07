@@ -32,7 +32,6 @@ final class StreamAssembler implements FileAssemblerInterface
 
         $out = $this->openOutputStream($targetPath);
 
-        $closedOut = false;
         try {
             for ($i = 0; $i < $state->totalChunks; $i++) {
                 $chunkDto = new Chunk(
@@ -67,11 +66,10 @@ final class StreamAssembler implements FileAssemblerInterface
 
             fflush($out);
             fclose($out);
-            $closedOut = true;
 
             return $targetPath;
         } catch (\Throwable $e) {
-            if (!$closedOut && is_resource($out)) {
+            if (is_resource($out)) {
                 fclose($out);
             }
 

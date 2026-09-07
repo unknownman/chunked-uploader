@@ -1,3 +1,11 @@
+![Resumable Chunked Uploader](docs/banner.svg)
+
+<!--
+    RESUMABLE CHUNKED UPLOADER
+    ==========================
+    Stream. Resume. Assemble.
+-->
+
 # Resumable Chunked Uploader
 
 [![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-8892BF)](https://www.php.net/releases/)
@@ -47,6 +55,11 @@ large it is.
     fails, so transient database errors do not create permanent orphan bytes.
 - **Bounded cleanup** scans local directories, S3 pages, Redis cursors, and PDO
     rows incrementally, including S3 deletion batches larger than 1,000 objects.
+- **`ChunkUploader`** is the canonical coordinator; `UploadManager` remains a
+    deprecated compatibility alias for existing 1.x applications.
+- **Optional PHP 8 attributes** provide endpoint-specific immutable config
+    overrides without changing global defaults.
+- **Flysystem v3** storage is available as an optional driver.
 - **Zero framework dependency** in the core package.
 - **Laravel** and **Symfony** bridges + a **dependency-free vanilla JS** client.
 
@@ -431,6 +444,32 @@ browser for a ready-to-run drag-and-drop demo.
 | `EventDispatcherInterface` | `dispatch(object): object` |
 
 ---
+
+## Endpoint-specific attributes
+
+Global Laravel or Symfony configuration remains the default. A controller
+method can opt into a narrower immutable configuration for its own uploads:
+
+```php
+use Resumable\ChunkedUploader\Core\Attributes\ChunkedUpload;
+
+final class MediaController
+{
+    #[ChunkedUpload(
+        maxFileSize: 50 * 1024 * 1024,
+        allowedMimeTypes: ['video/mp4'],
+        tokenSalt: 'media-endpoint',
+    )]
+    public function upload(): void
+    {
+        // Resolve the method with ChunkedUploadConfigResolver in the bridge,
+        // then pass the returned UploaderConfig to ChunkUploader::processChunk.
+    }
+}
+```
+
+The core resolver accepts either a `ReflectionMethod` or `ReflectionClass` and
+returns the unchanged global instance when no attribute is present.
 
 ## Configuration options
 

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" role="img" aria-labelledby="title desc">
+  <title id="title">Resumable Chunked Uploader</title>
+  <desc id="desc">A dark technical banner showing a stream of file chunks becoming one assembled file.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.55" stop-color="#14263c"/>
+      <stop offset="1" stop-color="#071018"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#43d9c5"/>
+      <stop offset="1" stop-color="#7aa7ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="420" fill="url(#background)"/>
+  <path d="M0 330 C300 250 430 390 720 300 S1170 190 1600 285" fill="none" stroke="#24425a" stroke-width="2"/>
+  <g transform="translate(1050 112)">
+    <rect x="0" y="0" width="72" height="72" rx="8" fill="#173650" stroke="#43d9c5" stroke-width="3"/>
+    <rect x="94" y="0" width="72" height="72" rx="8" fill="#1b4260" stroke="#43d9c5" stroke-width="3"/>
+    <rect x="188" y="0" width="72" height="72" rx="8" fill="#245276" stroke="#7aa7ff" stroke-width="3"/>
+    <path d="M282 36 H380" stroke="url(#accent)" stroke-width="5"/>
+    <path d="m365 20 18 16-18 16" fill="none" stroke="#7aa7ff" stroke-width="5"/>
+    <path d="M380 120 H282" stroke="url(#accent)" stroke-width="5"/>
+    <path d="m297 104-18 16 18 16" fill="none" stroke="#43d9c5" stroke-width="5"/>
+    <rect x="188" y="84" width="72" height="72" rx="8" fill="#244f68" stroke="#7aa7ff" stroke-width="3"/>
+    <rect x="94" y="84" width="72" height="72" rx="8" fill="#1b4260" stroke="#43d9c5" stroke-width="3"/>
+    <rect x="0" y="84" width="72" height="72" rx="8" fill="#173650" stroke="#43d9c5" stroke-width="3"/>
+  </g>
+  <text x="110" y="168" fill="#f4f8ff" font-family="Georgia, serif" font-size="56" font-weight="700">Resumable</text>
+  <text x="110" y="235" fill="#f4f8ff" font-family="Georgia, serif" font-size="56" font-weight="700">Chunked Uploader</text>
+  <text x="114" y="285" fill="#9bb5c8" font-family="monospace" font-size="19" letter-spacing="1">STREAM  ·  RESUME  ·  ASSEMBLE</text>
+</svg>

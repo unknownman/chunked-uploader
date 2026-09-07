@@ -12,8 +12,11 @@ use Illuminate\Support\ServiceProvider;
 use Resumable\ChunkedUploader\Bridge\Laravel\Commands\CleanupOrphanedChunksCommand;
 use Resumable\ChunkedUploader\Bridge\Laravel\Events\LaravelEventDispatcher;
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
+use Resumable\ChunkedUploader\Core\Configuration\ChunkedUploadConfigResolver;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkUploaderInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
@@ -32,7 +35,6 @@ use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
 use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
-use Resumable\ChunkedUploader\Core\UploadManager;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
 use Resumable\ChunkedUploader\Core\Validation\Rules\ChecksumRule;
 use Resumable\ChunkedUploader\Core\Validation\Rules\ExtensionMimeMatchRule;
@@ -95,6 +97,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
     private function registerCore(): void
     {
         $this->app->singleton(PathSanitizer::class);
+        $this->app->singleton(ChunkedUploadConfigResolver::class);
         $this->app->singleton(MagicByteValidator::class);
 
         $this->app->singleton(UploadTokenService::class, static function (): UploadTokenService {
@@ -120,7 +123,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         $this->registerVirusScanner();
         $this->registerRateLimiter();
 
-        $this->app->singleton(UploadManager::class, static function ($app): UploadManager {
+        $this->app->singleton(ChunkUploader::class, static function ($app): ChunkUploader {
             /** @var ConfigRepository $config */
             $config = app('config');
             $rateLimiting = (bool) $config->get('chunk-uploader.rate_limiting.enabled', false);
@@ -128,7 +131,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
             $rateLimitWindow = (int) $config->get('chunk-uploader.rate_limiting.decay_seconds', 60);
             $rateLimitKey = (string) $config->get('chunk-uploader.rate_limiting.key', 'chunked-uploader:chunks');
 
-            return new UploadManager(
+            return new ChunkUploader(
                 storage: $app->make(ChunkStorageInterface::class),
                 metadata: $app->make(MetadataRepositoryInterface::class),
                 progress: $app->make(ProgressTrackerInterface::class),
@@ -142,11 +145,13 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 maxChunkAttempts: $rateLimiting ? $rateLimitMax : null,
                 rateLimitWindow: $rateLimitWindow,
                 rateLimitKey: $rateLimitKey,
+                config: $app->make(UploaderConfig::class),
             );
         });
 
-        $this->app->alias(UploadManager::class, UploadManagerInterface::class);
-        $this->app->alias(UploadManager::class, 'chunk-uploader');
+        $this->app->alias(ChunkUploader::class, ChunkUploaderInterface::class);
+        $this->app->alias(ChunkUploader::class, UploadManagerInterface::class);
+        $this->app->alias(ChunkUploader::class, 'chunk-uploader');
 
         $this->app->singleton(GarbageCollector::class, static function ($app): GarbageCollector {
             return new GarbageCollector(
@@ -295,6 +300,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                     ? $app->make(VirusScannerInterface::class)
                     : null,
                 tokenSalt: (string) $config->get('chunk-uploader.token_salt', ''),
+                config: $app->make(UploaderConfig::class),
             );
         });
     }

@@ -27,6 +27,11 @@ final class PathSanitizer
         'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
     ];
 
+    private const EXECUTABLE_EXTENSIONS = [
+        'php', 'php3', 'php4', 'php5', 'phtml', 'phar', 'cgi', 'inc',
+        'pl', 'py', 'rb', 'sh', 'bash', 'asp', 'aspx', 'jsp', 'jspx', 'war',
+    ];
+
     /**
      * Returns a sanitized basename safe for use as a local filename segment.
      *
@@ -58,6 +63,10 @@ final class PathSanitizer
             throw new PathTraversalException('Filename uses a reserved device name.');
         }
 
+        if ($this->containsExecutableExtension($name)) {
+            throw new PathTraversalException('Filename uses a prohibited executable extension.');
+        }
+
         return substr($name, 0, 255);
     }
 
@@ -82,5 +91,19 @@ final class PathSanitizer
         }
 
         return $identifier;
+    }
+
+    public function containsExecutableExtension(string $name): bool
+    {
+        $parts = explode('.', strtolower($name));
+        array_shift($parts);
+
+        foreach ($parts as $extension) {
+            if (in_array($extension, self::EXECUTABLE_EXTENSIONS, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

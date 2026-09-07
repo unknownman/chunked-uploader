@@ -9,6 +9,7 @@ namespace Resumable\ChunkedUploader\Core\Contracts;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
 use Resumable\ChunkedUploader\Core\Exceptions\UploadFailedException;
+use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 
@@ -46,7 +47,7 @@ interface UploadManagerInterface
      * @throws SecurityViolationException when malicious payloads are detected
      * @throws UploadFailedException      when an unexpected workflow failure occurs
      */
-    public function processChunk(Chunk $chunk): UploadState;
+    public function processChunk(Chunk $chunk, ?UploaderConfig $config = null): UploadState;
 
     /**
      * Aborts an upload and releases every resource associated with it.

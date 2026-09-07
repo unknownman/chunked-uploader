@@ -8,6 +8,7 @@ namespace Resumable\ChunkedUploader\Core\Validation;
 
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
+use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
@@ -40,6 +41,7 @@ final class ChunkSecurityValidator implements ChunkValidatorInterface
         private readonly UploadTokenService $tokenService,
         private readonly ?VirusScannerInterface $scanner = null,
         private readonly string $tokenSalt = '',
+        private readonly UploaderConfig $config = new UploaderConfig(),
     ) {
     }
 
@@ -53,10 +55,15 @@ final class ChunkSecurityValidator implements ChunkValidatorInterface
      */
     public function validate(Chunk $chunk): bool
     {
+        return $this->validateWithConfig($chunk, $this->config);
+    }
+
+    public function validateWithConfig(Chunk $chunk, UploaderConfig $config): bool
+    {
         $this->sanitizer->sanitizeIdentifier($chunk->identifier);
         $this->sanitizer->sanitizeFilename($chunk->originalFilename);
 
-        if ($chunk->index < 0 || $chunk->index >= $chunk->totalChunks || $chunk->totalChunks < 1 || $chunk->totalSize < 1) {
+        if ($chunk->index < 0 || $chunk->index >= $chunk->totalChunks || $chunk->totalSize < 1) {
             throw new InvalidChunkException('Chunk metadata is out of range.');
         }
 
@@ -66,13 +73,13 @@ final class ChunkSecurityValidator implements ChunkValidatorInterface
                 $chunk->identifier,
                 $chunk->totalChunks,
                 $chunk->totalSize,
-                $this->tokenSalt,
+                $config->tokenSalt !== '' ? $config->tokenSalt : $this->tokenSalt,
             )
         ) {
             throw new SecurityViolationException('Upload token verification failed.');
         }
 
-        $this->pipeline->validate($chunk);
+        $this->pipeline->validate($chunk, $config);
         $this->scanner?->scan($chunk->tmpFilePath);
 
         return true;
