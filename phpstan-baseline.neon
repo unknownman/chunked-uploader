@@ -1,0 +1,226 @@
+parameters:
+	ignoreErrors:
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Commands/CleanupOrphanedChunksCommand.php
+
+		-
+			message: "#^Method Resumable\\\\ChunkedUploader\\\\Bridge\\\\Laravel\\\\Events\\\\LaravelEventDispatcher\\:\\:dispatch\\(\\) should return T of object but returns object\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Events/LaravelEventDispatcher.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 10
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Cannot cast mixed to string\\.$#"
+			count: 16
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Parameter \\#1 \\$name of static method Illuminate\\\\Support\\\\Facades\\\\Redis\\:\\:connection\\(\\) expects string\\|null, mixed given\\.$#"
+			count: 2
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Parameter \\#2 \\$allowedMimes of class Resumable\\\\ChunkedUploader\\\\Core\\\\Validation\\\\Rules\\\\MagicByteRule constructor expects array\\<int, string\\>, array given\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Parameter \\$allowedMimeTypes of class Resumable\\\\ChunkedUploader\\\\Core\\\\Configuration\\\\UploaderConfig constructor expects array\\<int, string\\>, array given\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Parameter \\$redis of class Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Metadata\\\\RedisMetadataRepository constructor expects Predis\\\\ClientInterface\\|Redis, mixed given\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Parameter \\$redis of class Resumable\\\\ChunkedUploader\\\\Core\\\\Security\\\\RateLimiting\\\\RedisRateLimiter constructor expects Predis\\\\ClientInterface\\|Redis, mixed given\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 4
+			path: src/Bridge/Laravel/config/chunk-uploader.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 2
+			path: src/Bridge/Symfony/Command/CleanupOrphanedChunksCommand.php
+
+		-
+			message: "#^Cannot access offset 'connection' on mixed\\.$#"
+			count: 1
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot access offset 'connection_service' on mixed\\.$#"
+			count: 2
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot access offset 'enabled' on mixed\\.$#"
+			count: 2
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot access offset 'host' on mixed\\.$#"
+			count: 1
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot access offset 'port' on mixed\\.$#"
+			count: 1
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 1
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Cannot cast mixed to string\\.$#"
+			count: 5
+			path: src/Bridge/Symfony/DependencyInjection/ChunkUploaderExtension.php
+
+		-
+			message: "#^Parameter \\#1 \\$state of class Resumable\\\\ChunkedUploader\\\\Core\\\\Events\\\\UploadFailedEvent constructor expects Resumable\\\\ChunkedUploader\\\\Core\\\\Models\\\\UploadState, Resumable\\\\ChunkedUploader\\\\Core\\\\Models\\\\UploadState\\|null given\\.$#"
+			count: 1
+			path: src/Core/ChunkUploader.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 2
+			path: src/Core/Drivers/Metadata/PdoMetadataRepository.php
+
+		-
+			message: "#^Cannot cast mixed to string\\.$#"
+			count: 5
+			path: src/Core/Drivers/Metadata/PdoMetadataRepository.php
+
+		-
+			message: "#^Method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Metadata\\\\PdoMetadataRepository\\:\\:lockForUpdate\\(\\) should return array\\<string, mixed\\>\\|null but returns mixed\\.$#"
+			count: 1
+			path: src/Core/Drivers/Metadata/PdoMetadataRepository.php
+
+		-
+			message: "#^Parameter \\#1 \\$callback of function array_map expects \\(callable\\(mixed\\)\\: mixed\\)\\|null, 'intval' given\\.$#"
+			count: 1
+			path: src/Core/Drivers/Metadata/PdoMetadataRepository.php
+
+		-
+			message: "#^Parameter \\#1 \\$row of method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Metadata\\\\PdoMetadataRepository\\:\\:hydrate\\(\\) expects array\\<string, mixed\\>, mixed given\\.$#"
+			count: 1
+			path: src/Core/Drivers/Metadata/PdoMetadataRepository.php
+
+		-
+			message: "#^Cannot cast mixed to string\\.$#"
+			count: 1
+			path: src/Core/Drivers/Metadata/RedisMetadataRepository.php
+
+		-
+			message: "#^Call to an undefined method object\\:\\:delete\\(\\)\\.$#"
+			count: 3
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Call to an undefined method object\\:\\:fileExists\\(\\)\\.$#"
+			count: 3
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Call to an undefined method object\\:\\:listContents\\(\\)\\.$#"
+			count: 2
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Call to an undefined method object\\:\\:readStream\\(\\)\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Call to an undefined method object\\:\\:writeStream\\(\\)\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Cannot call method isFile\\(\\) on class\\-string\\|object\\.$#"
+			count: 2
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Cannot call method lastModified\\(\\) on class\\-string\\|object\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/FlysystemChunkStorage.php
+
+		-
+			message: "#^Cannot call method getFilename\\(\\) on SplFileInfo\\|string\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/LocalChunkStorage.php
+
+		-
+			message: "#^Cannot call method getPathname\\(\\) on SplFileInfo\\|string\\.$#"
+			count: 2
+			path: src/Core/Drivers/Storage/LocalChunkStorage.php
+
+		-
+			message: "#^Cannot call method isDir\\(\\) on SplFileInfo\\|string\\.$#"
+			count: 2
+			path: src/Core/Drivers/Storage/LocalChunkStorage.php
+
+		-
+			message: "#^Cannot call method isLink\\(\\) on SplFileInfo\\|string\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/LocalChunkStorage.php
+
+		-
+			message: "#^Argument of an invalid type mixed supplied for foreach, only iterables are supported\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Cannot access offset 'Key' on mixed\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Cannot access offset 'LastModified' on mixed\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Cannot cast mixed to string\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Parameter \\#1 \\$objects of method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Storage\\\\S3ChunkStorage\\:\\:purgeKeys\\(\\) expects iterable\\<array\\{Key\\: string\\}\\>, mixed given\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Parameter \\#1 \\$objects of method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Storage\\\\S3ChunkStorage\\:\\:purgeKeys\\(\\) expects iterable\\<array\\{Key\\: string\\}\\>, non\\-empty\\-array\\<int\\<0, max\\>, array\\{Key\\: mixed\\}\\> given\\.$#"
+			count: 1
+			path: src/Core/Drivers/Storage/S3ChunkStorage.php
+
+		-
+			message: "#^Cannot cast mixed to int\\.$#"
+			count: 1
+			path: src/Core/Security/RateLimiting/RedisRateLimiter.php
+
+		-
+			message: "#^Method Resumable\\\\ChunkedUploader\\\\Core\\\\Security\\\\RateLimiting\\\\RedisRateLimiter\\:\\:hit\\(\\) should return int but returns int\\|Redis\\|false\\.$#"
+			count: 1
+			path: src/Core/Security/RateLimiting/RedisRateLimiter.php
+
+		-
+			message: "#^Parameter \\#1 \\$stream of function fwrite expects resource, mixed given\\.$#"
+			count: 1
+			path: src/Core/Security/Scanners/ClamAvScanner.php

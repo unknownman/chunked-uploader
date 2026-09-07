@@ -1,11 +1,13 @@
+includes:
+    - phpstan-baseline.neon
+
 parameters:
-    level: 6
+    level: 9
     paths:
         - src
     tmpDir: .phpstan.cache
     bootstrapFiles:
         - phpstan-bootstrap.php
-
     # Runtime guards in these core files are deliberately retained even though
     # PHPStan's data-flow narrowing proves them unreachable under the current
     # type graph (e.g. a freshly built Chunk always carries positive totals).
