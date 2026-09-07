@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
          colors="true"
-         failOnWarning="true"
+         cacheDirectory=".phpunit.cache"
+         executionOrder="depends,defects"
+         beStrictAboutOutputDuringTests="true"
          failOnRisky="true"
-         cacheDirectory=".phpunit.cache">
+         failOnWarning="true">
+    <php>
+        <ini name="error_reporting" value="-1" />
+        <ini name="memory_limit" value="-1" />
+    </php>
     <testsuites>
         <testsuite name="Unit">
             <directory suffix="Test.php">tests/Unit</directory>
@@ -14,7 +20,7 @@
             <directory suffix="Test.php">tests/Feature</directory>
         </testsuite>
     </testsuites>
-    <source ignoreIndirectDeprecations="true" ignoreDirectDeprecations="true">
+    <source>
         <include>
             <directory suffix=".php">src</directory>
         </include>
