@@ -53,6 +53,10 @@ final class MagicByteValidator
                 throw new InvalidChunkException('Unable to read file header for MIME inspection.');
             }
 
+            if ($header === '') {
+                throw new InvalidChunkException('File is empty; cannot determine a MIME type.');
+            }
+
             $finfo = $this->finfo ?? new \finfo(FILEINFO_MIME_TYPE);
             $mime = $finfo->buffer($header);
             if ($mime === false || $mime === '') {

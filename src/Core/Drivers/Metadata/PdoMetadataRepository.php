@@ -28,8 +28,13 @@ use Resumable\ChunkedUploader\Core\Models\UploadState;
  */
 class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrackerInterface
 {
+    /** Maximum identifier rows collected per garbage-collection delete batch. */
+    private const CLEAN_BATCH_SIZE = 1000;
+
     /** @var array<string, string> Quoted column name cache keyed by table name. */
     private array $quotedColumns = [];
+
+    private ?bool $sqliteUpsertSupported = null;
 
     /**
      * @param PDO    $pdo       Database connection; exceptions must be enabled
@@ -40,6 +45,18 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
         private readonly string $tableName = 'chunked_upload_states',
     ) {
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        if ($this->isSqlite()) {
+            // Without a busy timeout a concurrent writer makes SQLite fail fast
+            // with "database is locked". Waiting a few seconds lets contending
+            // writes drain instead of rejecting otherwise-fine uploads.
+            try {
+                $this->pdo->exec('PRAGMA busy_timeout = 5000');
+            } catch (PDOException) {
+                // busy_timeout is advisory; failing to set it must not prevent
+                // construction.
+            }
+        }
     }
 
     public function get(string $identifier): ?UploadState
@@ -123,19 +140,32 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
             throw new \InvalidArgumentException('TTL must be a positive number of seconds.');
         }
 
-        $driver = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-        $sql = $driver === 'sqlite' || $driver === 'sqlsrv'
-            ? 'DELETE FROM ' . $this->quoteIdent($this->tableName) . ' WHERE updated_at <= :cutoff'
-            : 'DELETE FROM ' . $this->quoteIdent($this->tableName) . ' WHERE is_completed = 0 AND updated_at <= :cutoff';
+        $cutoff = time() - $ttlSeconds;
+        $removed = 0;
 
         try {
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute([':cutoff' => time() - $ttlSeconds]);
+            // Rows are reaped in bounded pages so a table with millions of
+            // abandoned uploads never loads the full identifier set into memory
+            // and never holds a single delete lock for the whole sweep.
+            while (true) {
+                $batch = $this->fetchExpiredIdentifiers($cutoff);
+                if ($batch === []) {
+                    break;
+                }
 
-            return $stmt->rowCount();
+                $deleted = $this->deleteByIdentifiers($batch);
+                $removed += $deleted;
+
+                // A short page means no further expired rows are pending.
+                if (count($batch) < self::CLEAN_BATCH_SIZE) {
+                    break;
+                }
+            }
         } catch (PDOException $e) {
             throw new MetadataException('Unable to purge expired upload states.', 0, $e);
         }
+
+        return $removed;
     }
 
     public function getPercentage(UploadState $state): float
@@ -285,17 +315,25 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
         ];
 
         if ($driver === 'sqlite') {
-            $sql = 'INSERT INTO ' . $table . ' '
-                . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
-                . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
-                . 'ON CONFLICT(identifier) DO UPDATE SET '
-                . 'total_chunks = excluded.total_chunks, '
-                . 'total_size = excluded.total_size, '
-                . 'original_filename = excluded.original_filename, '
-                . 'uploaded_chunks = excluded.uploaded_chunks, '
-                . 'is_completed = excluded.is_completed, '
-                . 'final_path = excluded.final_path, '
-                . 'updated_at = excluded.updated_at';
+            if ($this->supportsSqliteUpsert()) {
+                $sql = 'INSERT INTO ' . $table . ' '
+                    . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
+                    . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
+                    . 'ON CONFLICT(identifier) DO UPDATE SET '
+                    . 'total_chunks = excluded.total_chunks, '
+                    . 'total_size = excluded.total_size, '
+                    . 'original_filename = excluded.original_filename, '
+                    . 'uploaded_chunks = excluded.uploaded_chunks, '
+                    . 'is_completed = excluded.is_completed, '
+                    . 'final_path = excluded.final_path, '
+                    . 'updated_at = excluded.updated_at';
+            } else {
+                // ON CONFLICT ... DO UPDATE requires SQLite >= 3.24; on legacy
+                // builds INSERT OR REPLACE is the only atomic upsert available.
+                $sql = 'INSERT OR REPLACE INTO ' . $table . ' '
+                    . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
+                    . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt)';
+            }
         } elseif ($driver === 'pgsql') {
             $sql = 'INSERT INTO ' . $table . ' '
                 . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
@@ -324,6 +362,63 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
+    }
+
+    /**
+     * Returns whether the attached SQLite build understands
+     * `ON CONFLICT ... DO UPDATE` (introduced in 3.24.0).
+     */
+    private function supportsSqliteUpsert(): bool
+    {
+        if ($this->sqliteUpsertSupported === null) {
+            $version = (string) $this->pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
+            $this->sqliteUpsertSupported = version_compare($version, '3.24.0', '>=');
+        }
+
+        return $this->sqliteUpsertSupported;
+    }
+
+    /**
+     * Collects the identifiers of the oldest expired upload rows, bounded to one
+     * cleanup page.
+     *
+     * @return list<string>
+     */
+    private function fetchExpiredIdentifiers(int $cutoff): array
+    {
+        $table = $this->quoteIdent($this->tableName);
+        $driver = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+
+        if ($driver === 'sqlsrv') {
+            $sql = 'SELECT TOP ' . self::CLEAN_BATCH_SIZE . ' identifier FROM ' . $table
+                . ' WHERE is_completed = 0 AND updated_at <= :cutoff ORDER BY updated_at';
+        } else {
+            $sql = 'SELECT identifier FROM ' . $table
+                . ' WHERE is_completed = 0 AND updated_at <= :cutoff ORDER BY updated_at LIMIT ' . self::CLEAN_BATCH_SIZE;
+        }
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([':cutoff' => $cutoff]);
+        $rows = $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+
+        return array_values(array_map('strval', $rows));
+    }
+
+    /**
+     * Deletes a bounded batch of upload rows by identifier.
+     *
+     * @param non-empty-list<string> $identifiers
+     */
+    private function deleteByIdentifiers(array $identifiers): int
+    {
+        $table = $this->quoteIdent($this->tableName);
+        $placeholders = implode(',', array_fill(0, count($identifiers), '?'));
+        $sql = 'DELETE FROM ' . $table . ' WHERE identifier IN (' . $placeholders . ')';
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute(array_values($identifiers));
+
+        return $stmt->rowCount();
     }
 
     /**

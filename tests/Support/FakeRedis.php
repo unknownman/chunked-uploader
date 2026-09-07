@@ -63,6 +63,30 @@ final class FakeRedis extends Redis
         return sha1((string) ($args[0] ?? ''));
     }
 
+    public function scan(string|int|null &$iterator, ?string $pattern = null, int $count = 0, ?string $type = null): array|false
+    {
+        $keys = array_keys($this->data);
+        if ($pattern !== null) {
+            $keys = array_values(array_filter($keys, static fn (string $key): bool => fnmatch($pattern, $key)));
+        }
+        sort($keys, SORT_STRING);
+
+        $cursor = (int) ($iterator ?? 0);
+        if ($cursor >= count($keys)) {
+            $iterator = 0;
+            return false;
+        }
+
+        $page = array_slice($keys, $cursor, max($count, 1));
+        $iterator = $cursor + count($page);
+        if ($iterator >= count($keys)) {
+            // phpredis signals the end of a scan by resetting the cursor to 0.
+            $iterator = 0;
+        }
+
+        return $page;
+    }
+
     public function eval(string $script, array $args = [], int $num_keys = 0): mixed
     {
         $key = $args[0] ?? null;

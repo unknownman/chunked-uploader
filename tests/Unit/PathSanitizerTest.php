@@ -43,6 +43,13 @@ final class PathSanitizerTest extends TestCase
         yield 'null byte in middle' => ["foo\0bar.txt"];
         yield 'dot dot filename' => ['..'];
         yield 'dot dot filename with ext' => ['..jpg'];
+        yield 'windows reserved device name con' => ['CON.txt'];
+        yield 'windows reserved device name aux' => ['Aux.log'];
+        yield 'windows reserved device name prin' => ['PRN'];
+        yield 'windows reserved serial port name' => ['COM1.bin'];
+        yield 'windows reserved parallel port name' => ['LPT9.xlsx'];
+        yield 'reserved device name without extension' => ['NUL'];
+        yield 'reserved device name with traversal casing' => ['cOn.txt'];
     }
 
     #[Test]

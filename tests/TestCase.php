@@ -273,6 +273,17 @@ class InMemoryChunkStorage implements ChunkStorageInterface
         unset($this->files[$identifier], $this->timestamps[$identifier]);
     }
 
+    public function deleteChunk(Chunk $chunk): void
+    {
+        $path = $this->files[$chunk->identifier][$chunk->index] ?? null;
+        if ($path === null) {
+            return;
+        }
+
+        @unlink($path);
+        unset($this->files[$chunk->identifier][$chunk->index], $this->timestamps[$chunk->identifier][$chunk->index]);
+    }
+
     public function cleanOrphanedChunks(int $ttlSeconds): int
     {
         $now = time();

@@ -43,6 +43,10 @@ large it is.
 - **Magic-byte MIME validation** (only reads the first 4096 bytes).
 - **Strict path sanitization** against directory traversal.
 - **Optional** ClamAV scanning and Redis rate limiting.
+- **Atomic failure cleanup** removes a stored chunk when its metadata update
+    fails, so transient database errors do not create permanent orphan bytes.
+- **Bounded cleanup** scans local directories, S3 pages, Redis cursors, and PDO
+    rows incrementally, including S3 deletion batches larger than 1,000 objects.
 - **Zero framework dependency** in the core package.
 - **Laravel** and **Symfony** bridges + a **dependency-free vanilla JS** client.
 

@@ -90,12 +90,48 @@ final class RedisMetadataRepositoryTest extends TestCase
     }
 
     #[Test]
-    public function test_clean_expired_is_a_safe_no_op_without_scan_support(): void
+    public function test_clean_expired_purges_stale_abandoned_records_via_scan(): void
     {
-        // Redis keys carry their own TTL, so the repository does not implement a
-        // destructive sweep; the API exists for interface completeness and must
-        // not throw.
+        $this->repository->save(new UploadState('stale', 3, 300, 'a.bin', [0], false));
+        $this->backdate('repo:', 'stale', 7200);
+        $this->repository->save(new UploadState('fresh', 3, 300, 'b.bin', [0], false));
+
+        $removed = $this->repository->cleanExpired(3600);
+
+        self::assertSame(1, $removed);
+        self::assertNull($this->repository->get('stale'));
+        self::assertNotNull($this->repository->get('fresh'));
+    }
+
+    #[Test]
+    public function test_clean_expired_never_purges_completed_uploads(): void
+    {
+        $this->repository->save(new UploadState('finished', 2, 200, 'done.bin', [0, 1], true));
+        $this->backdate('repo:', 'finished', 7200);
+
         self::assertSame(0, $this->repository->cleanExpired(3600));
+        self::assertNotNull($this->repository->get('finished'));
+    }
+
+    #[Test]
+    public function test_clean_expired_returns_zero_when_nothing_is_stale(): void
+    {
+        $this->repository->save(new UploadState('active', 3, 300, 'a.bin', [0], false));
+
+        self::assertSame(0, $this->repository->cleanExpired(3600));
+        self::assertNotNull($this->repository->get('active'));
+    }
+
+    #[Test]
+    public function test_clean_expired_ignores_keys_it_cannot_parse_or_own(): void
+    {
+        $this->repository->save(new UploadState('stale', 2, 200, 'a.bin', [0], false));
+        $this->backdate('repo:', 'stale', 7200);
+        $foreign = 'repo:' . hash('sha256', 'foreign');
+        $this->redis->data[$foreign] = 'not-json';
+
+        self::assertSame(1, $this->repository->cleanExpired(3600));
+        self::assertArrayHasKey($foreign, $this->redis->data, 'A key that is not JSON must be left untouched.');
     }
 
     #[Test]
@@ -115,5 +151,13 @@ final class RedisMetadataRepositoryTest extends TestCase
         self::assertSame(50.0, $this->repository->getPercentage($state));
         self::assertFalse($this->repository->isComplete($state));
         self::assertSame([2, 3], $this->repository->getMissingChunkIndices($state));
+    }
+
+    private function backdate(string $prefix, string $identifier, int $seconds): void
+    {
+        $key = $prefix . hash('sha256', $identifier);
+        $state = json_decode($this->redis->data[$key], true);
+        $state['updatedAt'] = time() - $seconds;
+        $this->redis->data[$key] = (string) json_encode($state);
     }
 }

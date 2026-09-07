@@ -22,7 +22,10 @@ use Resumable\ChunkedUploader\Core\Models\UploadState;
  * optimistically-locked WATCH/MULTI/EXEC transaction and via a single Lua
  * script that reads, applies, and writes the new state atomically. The Lua
  * script is preferred because it is a single round-trip and cannot be aborted
- * by the client timing out between WATCH and EXEC.
+ * by the client timing out between WATCH and EXEC. Every script only touches
+ * KEYS[1] -- the key derived from a single identifier -- so all keys of a
+ * script resolve to one Redis cluster hash slot and cannot trigger CROSSSLOT
+ * errors.
  */
 class RedisMetadataRepository implements MetadataRepositoryInterface, ProgressTrackerInterface
 {
@@ -128,7 +131,72 @@ LUA;
             throw new \InvalidArgumentException('TTL must be a positive number of seconds.');
         }
 
-        return 0;
+        $cutoff = time() - $ttlSeconds;
+        $pattern = $this->keyPrefix . '*';
+        $removed = 0;
+
+        try {
+            // SCAN is cursor-based and incremental, so a store holding millions
+            // of state keys never materializes the full key set at once.
+            if ($this->redis instanceof \Redis) {
+                $iterator = null;
+                do {
+                    $keys = $this->redis->scan($iterator, $pattern, 500);
+                    if ($keys === false) {
+                        break;
+                    }
+
+                    foreach ($keys as $key) {
+                        $removed += $this->purgeIfExpired($key, $cutoff);
+                    }
+                } while ($iterator !== 0);
+
+                return $removed;
+            }
+
+            $iterator = new \Predis\Collection\Iterator\Keyspace($this->redis, $pattern, 500);
+            foreach ($iterator as $key) {
+                $removed += $this->purgeIfExpired((string) $key, $cutoff);
+            }
+        } catch (MetadataException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new MetadataException('Unable to purge expired upload states from Redis.', 0, $e);
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Deletes a single state key when it encodes a stale, abandoned upload.
+     *
+     * Keys that fail to parse, belong to completed uploads, or are still fresh
+     * are left untouched; unknown keys are never deleted.
+     */
+    private function purgeIfExpired(string $key, int $cutoff): int
+    {
+        $raw = $this->redis->get($key);
+        if (!is_string($raw) || $raw === '') {
+            return 0;
+        }
+
+        $data = json_decode($raw, true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return 0;
+        }
+
+        if (($data['isCompleted'] ?? false) === true) {
+            return 0;
+        }
+
+        $updatedAt = $data['updatedAt'] ?? null;
+        if (!is_int($updatedAt) || $updatedAt > $cutoff) {
+            return 0;
+        }
+
+        $this->redis->del($key);
+
+        return 1;
     }
 
     public function getPercentage(UploadState $state): float
@@ -169,7 +237,7 @@ LUA;
                 return null;
             }
 
-            return is_string($result) ? $result : json_encode($result);
+            return $this->normalizeScriptResult($result);
         }
 
         $result = $this->redis->eval(self::MARK_CHUNK_LUA, 1, $key, (string) $chunkIndex);
@@ -177,7 +245,7 @@ LUA;
             return null;
         }
 
-        return is_string($result) ? $result : json_encode($result);
+        return $this->normalizeScriptResult($result);
     }
 
     /**
@@ -221,11 +289,28 @@ LUA;
         return $json;
     }
 
+    /**
+     * Normalizes a Redis script response without allowing JSON failures to
+     * become an opaque return-type error.
+     */
+    private function normalizeScriptResult(mixed $result): string
+    {
+        if (is_string($result)) {
+            return $result;
+        }
+
+        $json = json_encode($result);
+        if ($json === false || json_last_error() !== JSON_ERROR_NONE) {
+            throw new MetadataException('Unable to decode Redis script response as JSON.');
+        }
+
+        return $json;
+    }
+
     private function decode(string $identifier, string $raw): UploadState
     {
         $data = json_decode($raw, true);
-
-        if (!is_array($data) || !isset($data['totalChunks'], $data['totalSize'], $data['originalFilename'])) {
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data) || !isset($data['totalChunks'], $data['totalSize'], $data['originalFilename'])) {
             throw new MetadataException('Stored upload state is corrupt in Redis.');
         }
 

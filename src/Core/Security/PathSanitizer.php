@@ -17,6 +17,17 @@ use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
 final class PathSanitizer
 {
     /**
+     * Windows-reserved device names that are forbidden even with an extension
+     * (CON, PRN, AUX, NUL, COM1-9, LPT1-9). Rejecting them keeps assembled
+     * filenames portable to Windows hosts regardless of where the server runs.
+     */
+    private const RESERVED_DEVICE_NAMES = [
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    ];
+
+    /**
      * Returns a sanitized basename safe for use as a local filename segment.
      *
      * Null bytes, control characters, directory separators, and traversal
@@ -33,7 +44,7 @@ final class PathSanitizer
         $name = preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?? '';
         $name = trim($name, '.-');
 
-        if ($name === '' || $name === '.' || $name === '..') {
+        if ($name === '' || $name === '.' || $name === '..' || str_contains($name, '/') || str_contains($name, '\\')) {
             throw new PathTraversalException('Filename is empty or unsafe.');
         }
 
@@ -41,6 +52,10 @@ final class PathSanitizer
         if ($extension !== '') {
             $stem = substr($name, 0, -(strlen($extension) + 1));
             $name = $stem . '.' . strtolower($extension);
+        }
+
+        if (in_array(strtoupper($extension === '' ? $name : substr($name, 0, -(strlen($extension) + 1))), self::RESERVED_DEVICE_NAMES, true)) {
+            throw new PathTraversalException('Filename uses a reserved device name.');
         }
 
         return substr($name, 0, 255);

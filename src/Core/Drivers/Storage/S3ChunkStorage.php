@@ -50,7 +50,7 @@ final class S3ChunkStorage implements ChunkStorageInterface
         $key = $this->objectKey($chunk->identifier, $chunk->index);
         $source = $chunk->tmpFilePath;
 
-        $stream = @fopen($source, 'rb');
+        $stream = fopen($source, 'rb');
         if ($stream === false) {
             throw new StorageException('Unable to open chunk source for S3 upload');
         }
@@ -77,6 +77,9 @@ final class S3ChunkStorage implements ChunkStorageInterface
             $result = $this->client->getObject([
                 'Bucket' => $this->bucket,
                 'Key' => $key,
+                // Stream the response body lazily instead of letting the SDK
+                // buffer it, keeping assembly O(1) in memory for any chunk size.
+                '@http' => ['stream' => true],
             ]);
         } catch (AwsException $e) {
             if ($e->getAwsErrorCode() === 'NoSuchKey' || $e->getStatusCode() === 404) {
@@ -104,30 +107,38 @@ final class S3ChunkStorage implements ChunkStorageInterface
 
     public function deleteChunks(string $identifier): void
     {
-        $id = $this->sanitize($identifier);
-        $prefix = $this->basePrefix . $id . '/';
+        $prefix = $this->basePrefix . $this->sanitize($identifier) . '/';
 
         try {
-            $objects = [];
             $paginator = $this->client->getPaginator('ListObjectsV2', [
                 'Bucket' => $this->bucket,
                 'Prefix' => $prefix,
             ]);
 
+            // Keys are deleted in bounded batches as they are surfaced by the
+            // paginator, so an upload with millions of chunk objects never
+            // materializes its full key list into memory at once.
             foreach ($paginator as $page) {
-                foreach (($page['Contents'] ?? []) as $object) {
-                    $objects[] = ['Key' => $object['Key']];
-                }
-            }
-
-            foreach (array_chunk($objects, self::MAX_DELETE_BATCH) as $batch) {
-                $this->client->deleteObjects([
-                    'Bucket' => $this->bucket,
-                    'Delete' => ['Objects' => $batch],
-                ]);
+                $this->purgeKeys($page['Contents'] ?? []);
             }
         } catch (AwsException $e) {
             throw new StorageException('Failed to delete chunks from S3: ' . $e->getAwsErrorMessage(), 0, $e);
+        }
+    }
+
+    public function deleteChunk(Chunk $chunk): void
+    {
+        try {
+            $this->client->deleteObject([
+                'Bucket' => $this->bucket,
+                'Key' => $this->objectKey($chunk->identifier, $chunk->index),
+            ]);
+        } catch (AwsException $e) {
+            if ($e->getAwsErrorCode() === 'NoSuchKey' || $e->getStatusCode() === 404) {
+                return;
+            }
+
+            throw new StorageException('Failed to delete chunk from S3: ' . $e->getAwsErrorMessage(), 0, $e);
         }
     }
 
@@ -146,8 +157,8 @@ final class S3ChunkStorage implements ChunkStorageInterface
                 'Prefix' => $this->basePrefix,
             ]);
 
-            $toDelete = [];
             foreach ($paginator as $page) {
+                $stale = [];
                 foreach (($page['Contents'] ?? []) as $object) {
                     $lastModified = $object['LastModified'] ?? null;
                     if ($lastModified === null) {
@@ -156,25 +167,56 @@ final class S3ChunkStorage implements ChunkStorageInterface
 
                     $timestamp = $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : strtotime((string) $lastModified);
                     if ($timestamp !== false && $timestamp <= $cutoff) {
-                        $toDelete[] = ['Key' => $object['Key']];
+                        $stale[] = ['Key' => $object['Key']];
                     }
                 }
-            }
 
-            if ($toDelete !== []) {
-                foreach (array_chunk($toDelete, self::MAX_DELETE_BATCH) as $batch) {
-                    $this->client->deleteObjects([
-                        'Bucket' => $this->bucket,
-                        'Delete' => ['Objects' => $batch],
-                    ]);
+                // Each page yields at most a bounded batch of stale keys, which
+                // are deleted immediately so scanning millions of objects never
+                // accumulates the whole key list in memory.
+                if ($stale !== []) {
+                    $this->purgeKeys($stale);
+                    $removed += count($stale);
                 }
-                $removed = count($toDelete);
             }
         } catch (AwsException $e) {
             throw new StorageException('Failed to clean orphaned chunks from S3: ' . $e->getAwsErrorMessage(), 0, $e);
         }
 
         return $removed;
+    }
+
+    /**
+     * Issues DeleteObjects calls over an iterable of keys, flushing each
+     * full 1000-key batch immediately and the remainder once exhausted.
+     *
+     * @param iterable<array{Key: string}> $objects Keys to remove
+     */
+    private function purgeKeys(iterable $objects): void
+    {
+        $batch = [];
+        foreach ($objects as $object) {
+            $batch[] = $object;
+            if (count($batch) >= self::MAX_DELETE_BATCH) {
+                $this->deleteBatch($batch);
+                $batch = [];
+            }
+        }
+
+        if ($batch !== []) {
+            $this->deleteBatch($batch);
+        }
+    }
+
+    /**
+     * @param non-empty-list<array{Key: string}> $objects
+     */
+    private function deleteBatch(array $objects): void
+    {
+        $this->client->deleteObjects([
+            'Bucket' => $this->bucket,
+            'Delete' => ['Objects' => $objects],
+        ]);
     }
 
     private function objectKey(string $identifier, int $index): string

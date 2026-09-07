@@ -77,6 +77,20 @@ interface ChunkStorageInterface
     public function deleteChunks(string $identifier): void;
 
     /**
+     * Removes the persisted artifact of a single chunk.
+     *
+     * Used to roll back an orphaned artifact when the corresponding metadata
+     * mutation fails (e.g. a chunk was stored but the upload state update could
+     * not be persisted). MUST be idempotent: removing a chunk that has no
+     * artifact MUST NOT raise an error.
+     *
+     * @param Chunk $chunk Immutable DTO identifying the chunk to remove
+     *
+     * @throws StorageException when the artifact exists but cannot be removed
+     */
+    public function deleteChunk(Chunk $chunk): void;
+
+    /**
      * Removes chunk artifacts that have not been touched within the TTL window.
      *
      * Used by the garbage collector to reclaim orphaned or abandoned upload

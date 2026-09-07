@@ -30,9 +30,7 @@ final class LocalChunkStorage implements ChunkStorageInterface
         private readonly string $baseDir,
         private readonly ?PathSanitizer $sanitizer = null,
     ) {
-        if (!is_dir($this->baseDir) && !@mkdir($this->baseDir, 0775, true) && !is_dir($this->baseDir)) {
-            throw new StorageException('Unable to create base directory');
-        }
+        $this->ensureDirectory($this->baseDir);
     }
 
     public function store(Chunk $chunk): void
@@ -40,13 +38,13 @@ final class LocalChunkStorage implements ChunkStorageInterface
         $id = $this->sanitize($chunk->identifier);
 
         $targetDir = $this->baseDir . DIRECTORY_SEPARATOR . $id;
-        if (!is_dir($targetDir) && !@mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
-            throw new StorageException('Unable to create upload directory');
-        }
+        $this->ensureDirectory($targetDir);
 
         // Guarantee the directory's mtime advances on every accepted chunk so
         // the Garbage Collector's TTL check stays accurate for chunk spools.
-        @touch($targetDir);
+        // Best-effort by design: an environment that forbids mtime updates must
+        // not reject otherwise-valid chunks.
+        $this->refreshDirectoryMtime($targetDir);
 
         $dest = $targetDir . DIRECTORY_SEPARATOR . 'chunk_' . $chunk->index . '.part';
 
@@ -55,25 +53,51 @@ final class LocalChunkStorage implements ChunkStorageInterface
         }
 
         $source = $chunk->tmpFilePath;
+        if (!is_file($source)) {
+            throw new StorageException('Chunk source file does not exist: ' . $source);
+        }
+
+        if (!is_readable($source)) {
+            throw new StorageException('Chunk source file is not readable: ' . $source);
+        }
+
         $moved = false;
-
         if (is_uploaded_file($source)) {
-            $moved = @move_uploaded_file($source, $dest);
+            $moved = move_uploaded_file($source, $dest);
+        }
+
+        if (!$moved && rename($source, $dest)) {
+            $moved = true;
         }
 
         if (!$moved) {
-            $moved = @rename($source, $dest);
-        }
+            // A cross-device move must be copied beside the destination first;
+            // renaming the completed temporary copy keeps readers from seeing
+            // a partially copied chunk.
+            $temporary = $dest . '.tmp-' . bin2hex(random_bytes(8));
+            $cleanupFailed = false;
+            try {
+                if (!copy($source, $temporary)) {
+                    throw new StorageException('Failed to copy chunk into local storage');
+                }
 
-        if (!$moved) {
-            $copied = @copy($source, $dest);
-            if ($copied) {
-                @unlink($source);
+                if (!rename($temporary, $dest)) {
+                    throw new StorageException('Failed to atomically publish chunk in local storage');
+                }
+
                 $moved = true;
+            } finally {
+                if (is_file($temporary) && !unlink($temporary)) {
+                    $cleanupFailed = true;
+                }
+            }
+
+            if ($cleanupFailed) {
+                throw new StorageException('Failed to remove temporary chunk file: ' . $temporary);
             }
         }
 
-        if (!$moved || !is_file($dest)) {
+        if (!is_file($dest) || !is_readable($dest)) {
             throw new StorageException('Failed to persist chunk to local storage');
         }
     }
@@ -87,7 +111,7 @@ final class LocalChunkStorage implements ChunkStorageInterface
             throw new ChunkNotFoundException('Chunk not found: ' . $path);
         }
 
-        $stream = @fopen($path, 'rb');
+        $stream = fopen($path, 'rb');
 
         if ($stream === false) {
             throw new StorageException('Unable to open chunk stream for reading');
@@ -105,14 +129,21 @@ final class LocalChunkStorage implements ChunkStorageInterface
             return;
         }
 
-        $iterator = new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS);
-        foreach ($iterator as $entry) {
-            if ($entry->isFile() || $entry->isLink()) {
-                @unlink($entry->getPathname());
-            }
+        $this->removeDirectoryRecursively($dir);
+    }
+
+    public function deleteChunk(Chunk $chunk): void
+    {
+        $id = $this->sanitize($chunk->identifier);
+        $path = $this->baseDir . DIRECTORY_SEPARATOR . $id . DIRECTORY_SEPARATOR . 'chunk_' . $chunk->index . '.part';
+
+        if (!is_file($path) && !is_link($path)) {
+            return;
         }
 
-        @rmdir($dir);
+        if (!unlink($path)) {
+            throw new StorageException('Unable to remove chunk artifact: ' . $path);
+        }
     }
 
     public function cleanOrphanedChunks(int $ttlSeconds): int
@@ -124,37 +155,35 @@ final class LocalChunkStorage implements ChunkStorageInterface
         $cutoff = time() - $ttlSeconds;
         $removed = 0;
 
-        $entries = @scandir($this->baseDir);
-        if ($entries === false) {
-            throw new StorageException('Unable to scan chunk storage base directory');
+        // FilesystemIterator walks the base directory lazily so a spool with
+        // millions of upload directories is never loaded into memory at once.
+        if (!is_dir($this->baseDir)) {
+            return 0;
         }
 
-        foreach ($entries as $entry) {
-            if ($entry === '.' || $entry === '..') {
+        $iterator = new FilesystemIterator($this->baseDir, FilesystemIterator::SKIP_DOTS);
+        foreach ($iterator as $entry) {
+            if (!$entry->isDir()) {
                 continue;
             }
 
-            $dir = $this->baseDir . DIRECTORY_SEPARATOR . $entry;
-            if (!is_dir($dir)) {
-                continue;
-            }
+            $dir = $entry->getPathname();
 
             try {
-                $this->sanitize($entry);
+                $this->sanitize($entry->getFilename());
             } catch (Throwable) {
                 // An entry that is not a valid upload identifier is not ours to
                 // manage and is left untouched.
                 continue;
             }
 
-            /** @var int|false $mtime */
-            $mtime = @filemtime($dir);
-            if ($mtime === false || $mtime > $cutoff) {
+            $mtime = $this->directoryMtime($dir);
+            if ($mtime === null || $mtime > $cutoff) {
                 continue;
             }
 
             try {
-                $this->deleteChunks($entry);
+                $this->removeDirectoryRecursively($dir);
                 $removed++;
             } catch (Throwable) {
                 // Skip an artifact that cannot be removed this pass.
@@ -162,6 +191,73 @@ final class LocalChunkStorage implements ChunkStorageInterface
         }
 
         return $removed;
+    }
+
+    /**
+     * Removes an upload's chunk directory including any nested entries.
+     *
+     * @throws StorageException when an entry cannot be removed
+     */
+    private function removeDirectoryRecursively(string $dir): void
+    {
+        $iterator = new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS);
+        foreach ($iterator as $entry) {
+            $path = $entry->getPathname();
+            if ($entry->isDir() && !$entry->isLink()) {
+                $this->removeDirectoryRecursively($path);
+            } elseif (!unlink($path)) {
+                throw new StorageException('Unable to remove chunk artifact: ' . $path);
+            }
+        }
+
+        if (!rmdir($dir)) {
+            throw new StorageException('Unable to remove chunk directory: ' . $dir);
+        }
+    }
+
+    /**
+     * Creates a directory recursively or verifies it already exists.
+     *
+     * @throws StorageException when the directory cannot be created
+     */
+    private function ensureDirectory(string $dir): void
+    {
+        if (is_dir($dir)) {
+            return;
+        }
+
+        if (!mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new StorageException('Unable to create directory: ' . $dir);
+        }
+    }
+
+    /**
+     * Bumps a directory's modification time for GC staleness tracking.
+     *
+     * @return bool True when the mtime was advanced, false when the
+     *              filesystem refused (non-fatal)
+     */
+    private function refreshDirectoryMtime(string $dir): bool
+    {
+        try {
+            return touch($dir);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Returns a directory's modification timestamp, or null when unreadable.
+     */
+    private function directoryMtime(string $dir): ?int
+    {
+        try {
+            $mtime = filemtime($dir);
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $mtime === false ? null : $mtime;
     }
 
     private function sanitize(string $identifier): string

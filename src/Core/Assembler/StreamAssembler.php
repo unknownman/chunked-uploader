@@ -10,6 +10,7 @@ use Resumable\ChunkedUploader\Core\Exceptions\AssemblyException;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
+use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 
 final class StreamAssembler implements FileAssemblerInterface
 {
@@ -17,25 +18,19 @@ final class StreamAssembler implements FileAssemblerInterface
 
     public function __construct(private readonly string $finalBaseDir)
     {
-        if (!is_dir($this->finalBaseDir) && !@mkdir($this->finalBaseDir, 0775, true) && !is_dir($this->finalBaseDir)) {
-            throw new AssemblyException('Unable to create final storage directory');
-        }
+        $this->ensureDirectory($this->finalBaseDir);
     }
 
     public function assemble(UploadState $state, ChunkStorageInterface $storage): string
     {
         $safeName = $this->sanitizeFilename($state->originalFilename);
-        $targetDir = rtrim($this->finalBaseDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $state->identifier;
-        if (!is_dir($targetDir) && !@mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
-            throw new AssemblyException('Unable to create assembly target directory');
-        }
+        $safeId = (new PathSanitizer())->sanitizeIdentifier($state->identifier);
+        $targetDir = rtrim($this->finalBaseDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $safeId;
+        $this->ensureDirectory($targetDir);
 
         $targetPath = $targetDir . DIRECTORY_SEPARATOR . $safeName;
 
-        $out = @fopen($targetPath, 'wb');
-        if ($out === false) {
-            throw new AssemblyException('Unable to open final file for writing');
-        }
+        $out = $this->openOutputStream($targetPath);
 
         $closedOut = false;
         try {
@@ -81,8 +76,8 @@ final class StreamAssembler implements FileAssemblerInterface
             }
 
             // attempt to remove partial file
-            if (is_file($targetPath)) {
-                @unlink($targetPath);
+            if (is_file($targetPath) && !unlink($targetPath)) {
+                throw new AssemblyException('Unable to remove partial final file: ' . $targetPath, 0, $e);
             }
 
             throw new AssemblyException('Assembly failed: ' . $e->getMessage(), 0, $e);
@@ -94,6 +89,59 @@ final class StreamAssembler implements FileAssemblerInterface
         $name = basename($name);
         // Replace any remaining unsafe characters
         return preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?: 'file.bin';
+    }
+
+    /**
+     * Creates a directory recursively or verifies it already exists.
+     *
+     * @throws AssemblyException when the directory cannot be created
+     */
+    private function ensureDirectory(string $dir): void
+    {
+        if (is_dir($dir)) {
+            return;
+        }
+
+        if (!is_dir($dir)) {
+            set_error_handler(static function (int $severity, string $message): never {
+                throw new AssemblyException($message);
+            });
+
+            try {
+                $created = mkdir($dir, 0775, true);
+            } finally {
+                restore_error_handler();
+            }
+
+            if (!$created && !is_dir($dir)) {
+                throw new AssemblyException('Unable to create directory: ' . $dir);
+            }
+        }
+    }
+
+    /**
+     * Opens the final destination and converts filesystem warnings into a
+     * typed assembly failure without allowing a partially opened handle out.
+     *
+     * @return resource
+     */
+    private function openOutputStream(string $path): mixed
+    {
+        set_error_handler(static function (int $severity, string $message): never {
+            throw new AssemblyException($message);
+        });
+
+        try {
+            $stream = fopen($path, 'wb');
+        } finally {
+            restore_error_handler();
+        }
+
+        if ($stream === false) {
+            throw new AssemblyException('Unable to open final file for writing');
+        }
+
+        return $stream;
     }
 
     /**

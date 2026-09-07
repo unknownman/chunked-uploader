@@ -31,7 +31,6 @@ use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
 use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
-use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 use Resumable\ChunkedUploader\Core\UploadManager;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
@@ -160,14 +159,15 @@ class ChunkUploaderServiceProvider extends ServiceProvider
 
     private function registerVirusScanner(): void
     {
+        /** @var ConfigRepository $config */
+        $config = app('config');
+        if (!(bool) $config->get('chunk-uploader.virus_scanning.enabled', false)) {
+            return;
+        }
+
         $this->app->singleton(VirusScannerInterface::class, static function (): VirusScannerInterface {
             /** @var ConfigRepository $config */
             $config = app('config');
-            $enabled = (bool) $config->get('chunk-uploader.virus_scanning.enabled', false);
-
-            if (!$enabled) {
-                return new NullVirusScanner();
-            }
 
             return new ClamAvScanner(
                 endpoint: sprintf(
@@ -181,6 +181,12 @@ class ChunkUploaderServiceProvider extends ServiceProvider
 
     private function registerRateLimiter(): void
     {
+        /** @var ConfigRepository $config */
+        $config = app('config');
+        if (!(bool) $config->get('chunk-uploader.rate_limiting.enabled', false)) {
+            return;
+        }
+
         $this->app->singleton(RateLimiterInterface::class, static function (): RateLimiterInterface {
             /** @var ConfigRepository $config */
             $config = app('config');
@@ -285,7 +291,9 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 sanitizer: $app->make(PathSanitizer::class),
                 pipeline: $pipeline,
                 tokenService: $app->make(UploadTokenService::class),
-                scanner: $app->make(VirusScannerInterface::class),
+                scanner: $app->bound(VirusScannerInterface::class)
+                    ? $app->make(VirusScannerInterface::class)
+                    : null,
                 tokenSalt: (string) $config->get('chunk-uploader.token_salt', ''),
             );
         });

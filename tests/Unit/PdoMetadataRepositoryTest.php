@@ -205,6 +205,68 @@ final class PdoMetadataRepositoryTest extends TestCase
         self::assertNotContains('BEGIN IMMEDIATE', $pdo->executed);
     }
 
+    #[Test]
+    public function test_sqlite_uses_on_conflict_upsert_on_modern_builds(): void
+    {
+        $pdo = new FakePdo('sqlite');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $repository->save($this->state('sqlite', [0]));
+        $upsert = end($pdo->prepared);
+
+        self::assertStringContainsString('INSERT INTO `states`', $upsert);
+        self::assertStringContainsString('ON CONFLICT(identifier) DO UPDATE SET', $upsert);
+        self::assertStringContainsString('excluded.total_chunks', $upsert);
+        self::assertStringNotContainsString('INSERT OR REPLACE', $upsert);
+    }
+
+    #[Test]
+    public function test_sqlite_falls_back_to_insert_or_replace_below_3_24(): void
+    {
+        $pdo = new FakePdo('sqlite');
+        $pdo->setServerVersion('3.23.0');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $repository->save($this->state('legacy', [0]));
+        $upsert = end($pdo->prepared);
+
+        self::assertStringContainsString('INSERT OR REPLACE INTO `states`', $upsert);
+        self::assertStringNotContainsString('ON CONFLICT', $upsert);
+    }
+
+    #[Test]
+    public function test_clean_expired_reaps_expired_rows_in_bounded_pages(): void
+    {
+        $pdo = new FakePdo('pgsql');
+        $pdo->nextFetchRows = ['a', 'b', 'c'];
+        $pdo->deleteRowCount = 3;
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $removed = $repository->cleanExpired(3600);
+
+        self::assertSame(3, $removed);
+        self::assertStringContainsString(
+            'SELECT identifier FROM "states" WHERE is_completed = 0 AND updated_at <= :cutoff ORDER BY updated_at LIMIT 1000',
+            $pdo->prepared[0],
+        );
+        self::assertStringContainsString('DELETE FROM "states" WHERE identifier IN (?,?,?)', $pdo->prepared[1]);
+        self::assertSame(2, count($pdo->prepared), 'A short page must end the sweep immediately.');
+    }
+
+    #[Test]
+    public function test_clean_expired_prefixes_sqlsrv_queries_with_top(): void
+    {
+        $pdo = new FakePdo('sqlsrv');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $repository->cleanExpired(3600);
+
+        self::assertStringContainsString(
+            'SELECT TOP 1000 identifier FROM "states" WHERE is_completed = 0 AND updated_at <= :cutoff',
+            $pdo->prepared[0],
+        );
+    }
+
     private function state(string $identifier, array $uploaded): UploadState
     {
         return new UploadState(

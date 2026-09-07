@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LocalChunkStorage`, and both framework bridges.
 
 ### Fixed
+- `UploadManager` now rolls back the persisted chunk artifact when the metadata
+  progress mutation fails, without masking the original failure if cleanup also
+  fails.
+- Laravel no longer resolves Redis or ClamAV services when their features are
+  disabled, allowing the local/default configuration to boot without either
+  optional dependency.
+- Local cross-device chunk copies are published through a temporary sibling and
+  atomic rename, preventing readers from observing partial chunk contents.
+- Redis metadata cleanup now uses Predis's native cursor iterator and script
+  responses validate JSON conversion explicitly.
+- Stream assembly converts filesystem warnings into typed exceptions and always
+  closes streams while removing partial output.
 - Symfony `Configuration` `local` node now calls `addDefaultsIfNotSet()`,
   avoiding an array-offset-on-null when the config is empty.
 - `S3ChunkStorage::deleteChunks()` and `cleanOrphanedChunks()` now batch a

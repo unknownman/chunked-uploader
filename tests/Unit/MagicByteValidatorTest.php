@@ -147,6 +147,18 @@ final class MagicByteValidatorTest extends TestCase
         $validator->detectMimeType($path);
     }
 
+    public function test_it_rejects_an_empty_file_without_invoking_finfo(): void
+    {
+        $finfo = $this->createStub(\finfo::class);
+        $finfo->expects(self::never())->method('buffer');
+
+        $validator = new MagicByteValidator(null, $finfo);
+        $path = $this->temporaryFile('');
+
+        $this->expectException(InvalidChunkException::class);
+        $validator->detectMimeType($path);
+    }
+
     private function pngSignature(): string
     {
         return "\x89PNG\r\n\x1a\n";

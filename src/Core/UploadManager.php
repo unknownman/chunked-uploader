@@ -119,6 +119,18 @@ final class UploadManager implements UploadManagerInterface
             $state = $this->metadata->markChunkAsUploaded($chunk->identifier, $chunk->index);
         } catch (Throwable $e) {
             $this->logger?->error('Failed to record chunk upload', ['error' => $e->getMessage()]);
+
+            // Roll back the persisted artifact so a chunk whose state could not
+            // be recorded never leaves an orphan behind; a cleanup failure is
+            // logged but must not mask the original error.
+            try {
+                $this->storage->deleteChunk($chunk);
+            } catch (Throwable $cleanupError) {
+                $this->logger?->warning('Failed to roll back orphaned chunk', [
+                    'error' => $cleanupError->getMessage(),
+                ]);
+            }
+
             $this->dispatchFailure($state, $e);
             throw new UploadFailedException('Failed to record uploaded chunk: ' . $e->getMessage(), 0, $e);
         }

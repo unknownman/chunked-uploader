@@ -92,6 +92,10 @@ final class S3ChunkStorageTest extends TestCase
             {
             }
 
+            public function deleteChunk(Chunk $chunk): void
+            {
+            }
+
             public function cleanOrphanedChunks(int $ttlSeconds): int
             {
                 return 0;
@@ -165,6 +169,66 @@ final class S3ChunkStorageTest extends TestCase
         self::assertCount(50, $batches[2][1][0]['Delete']['Objects']);
     }
 
+    #[Test]
+    public function test_delete_chunks_purges_ids_in_steamlined_pages(): void
+    {
+        $makeKeys = static fn (int $start, int $count): array => array_map(
+            static fn (int $i): array => ['Key' => 'chunks/track/chunk_' . ($start + $i) . '.part'],
+            range(0, $count - 1),
+        );
+
+        $client = new FakeS3Client();
+        $client->on('deleteObjects', static fn (array $args): array => []);
+        $client->paginate(static function () use ($makeKeys): \Generator {
+            for ($page = 0; $page < 4; $page++) {
+                yield ['Contents' => $makeKeys($page * 250, 250)];
+            }
+        });
+
+        $storage = new S3ChunkStorage($client, 'uploads');
+        $storage->deleteChunks('track');
+
+        // 4 pages of 250 keys each -> one deleteObjects flush per page, proving
+        // keys are deleted incrementally instead of being accumulated first.
+        $batches = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'deleteObjects'));
+        self::assertCount(4, $batches);
+        foreach ($batches as $batch) {
+            self::assertCount(250, $batch[1][0]['Delete']['Objects']);
+        }
+    }
+
+    #[Test]
+    public function test_delete_chunk_removes_the_single_object(): void
+    {
+        $client = new FakeS3Client();
+        $client->on('deleteObject', static function (array $args): array {
+            self::assertSame('uploads', $args['Bucket']);
+            self::assertSame('chunks/track/chunk_0.part', $args['Key']);
+            return [];
+        });
+
+        $storage = new S3ChunkStorage($client, 'uploads');
+        $storage->deleteChunk($this->chunkFor('track'));
+
+        self::assertSame('deleteObject', $client->calls[0][0]);
+    }
+
+    #[Test]
+    public function test_delete_chunk_tolerates_an_already_missing_object(): void
+    {
+        $client = new FakeS3Client();
+        $client->on('deleteObject', static fn (): array => throw new \Aws\Exception\AwsException(
+            'Not found',
+            new \Aws\Command('DeleteObject', ['Bucket' => 'uploads', 'Key' => 'chunks/track/chunk_0.part']),
+            ['code' => 'NoSuchKey'],
+        ));
+
+        $storage = new S3ChunkStorage($client, 'uploads');
+
+        $storage->deleteChunk($this->chunkFor('track'));
+        self::assertTrue(true);
+    }
+
     private function chunkFor(string $identifier, ?string $path = null): Chunk
     {
         return new Chunk(
@@ -215,7 +279,13 @@ final class FakeS3Client extends S3Client
         $pageFactory = $this->pageFactory;
         \assert($pageFactory !== null);
 
-        yield $pageFactory();
+        $page = $pageFactory();
+        if ($page instanceof \Iterator || $page instanceof \IteratorAggregate) {
+            yield from $page;
+            return;
+        }
+
+        yield $page;
     }
 
     public function __call($name, $arguments)
