@@ -83,9 +83,52 @@ return [
     | HMAC secret used to sign upload tokens. Override with a long random value
     | in production. Falls back to the application key when unset.
     |
+    | token_salt optionally binds each token to a client fingerprint (for
+    | example the client IP). Enabling it breaks uploads across roaming networks,
+    | so leave empty unless the stricter binding is required.
+    |
     */
 
     'token_secret' => env('CHUNK_UPLOADER_TOKEN_SECRET', env('APP_KEY', '')),
+    'token_salt' => env('CHUNK_UPLOADER_TOKEN_SALT', ''),
+
+    /*
+    |--------------------------------------------------------------------------
+    | ClamAV Virus Scanning
+    |--------------------------------------------------------------------------
+    |
+    | Streaming malware detection for assembled chunks via the ClamAV INSTREAM
+    | protocol. Disabled by default (no scan is performed). When enabled,
+    | `host` and `port` are combined into a `tcp://host:port` daemon endpoint;
+    | any infection rejects the chunk with a VirusDetectedException.
+    |
+    */
+
+    'virus_scanning' => [
+        'enabled' => env('CHUNK_UPLOADER_VIRUS_SCANNING', false),
+        'host' => env('CHUNK_UPLOADER_CLAMAV_HOST', '127.0.0.1'),
+        'port' => (int) env('CHUNK_UPLOADER_CLAMAV_PORT', 3310),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Chunk Rate Limiting
+    |--------------------------------------------------------------------------
+    |
+    | Fixed-window flood protection against excessive chunk submissions from a
+    | single client. When enabled, every inbound chunk is counted against the
+    | shared Redis-backed limiter key; after `max_attempts` chunks within
+    | `decay_seconds` the request is rejected before validation or disk I/O.
+    | Requires the Redis metadata driver to share its connection.
+    |
+    */
+
+    'rate_limiting' => [
+        'enabled' => env('CHUNK_UPLOADER_RATE_LIMITING', false),
+        'max_attempts' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_MAX', 100),
+        'decay_seconds' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_WINDOW', 60),
+        'key' => env('CHUNK_UPLOADER_RATE_LIMIT_KEY', 'chunked-uploader:chunks'),
+    ],
 
     /*
     |--------------------------------------------------------------------------

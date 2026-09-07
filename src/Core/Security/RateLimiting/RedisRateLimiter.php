@@ -4,13 +4,28 @@ declare(strict_types=1);
 
 namespace Resumable\ChunkedUploader\Core\Security\RateLimiting;
 
+use Predis\ClientInterface;
+use Redis;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
-use Resumable\ChunkedUploader\Core\Contracts\RedisConnectionInterface;
 
+/**
+ * Fixed-window rate limiter backed by a Redis counter with an expiry.
+ *
+ * Accepts either a native phpredis \Redis instance or a Predis client, unifying
+ * the package on the same `\Redis|\Predis\ClientInterface` union used by the
+ * Redis metadata repository. Callers that wire both together can share a single
+ * connection.
+ */
 final class RedisRateLimiter implements RateLimiterInterface
 {
-    public function __construct(private readonly RedisConnectionInterface $redis, private readonly string $prefix = 'rate-limit:')
-    {
+    /**
+     * @param Redis|ClientInterface $redis   Counter backend, shared with the metadata repository when possible.
+     * @param string                $prefix  Key namespace applied before the hashed limiter key.
+     */
+    public function __construct(
+        private readonly Redis|ClientInterface $redis,
+        private readonly string $prefix = 'rate-limit:',
+    ) {
     }
 
     /**
@@ -27,7 +42,7 @@ final class RedisRateLimiter implements RateLimiterInterface
         }
 
         $redisKey = $this->prefix . hash('sha256', $key);
-        $count = $this->redis->increment($redisKey);
+        $count = $this->redis->incr($redisKey);
         if ($count === 1) {
             $this->redis->expire($redisKey, $decaySeconds);
         }
@@ -49,7 +64,8 @@ final class RedisRateLimiter implements RateLimiterInterface
         }
 
         $redisKey = $this->prefix . hash('sha256', $key);
-        $count = $this->redis->get($redisKey);
+        $count = (int) $this->redis->get($redisKey);
+
         return $count >= $maxAttempts;
     }
 
@@ -61,6 +77,6 @@ final class RedisRateLimiter implements RateLimiterInterface
      */
     public function resetAttempts(string $key): void
     {
-        $this->redis->delete($this->prefix . hash('sha256', $key));
+        $this->redis->del($this->prefix . hash('sha256', $key));
     }
 }

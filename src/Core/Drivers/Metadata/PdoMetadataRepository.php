@@ -259,6 +259,18 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
                 . 'is_completed = excluded.is_completed, '
                 . 'final_path = excluded.final_path, '
                 . 'updated_at = excluded.updated_at';
+        } elseif ($driver === 'pgsql') {
+            $sql = 'INSERT INTO ' . $table . ' '
+                . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
+                . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
+                . 'ON CONFLICT(identifier) DO UPDATE SET '
+                . 'total_chunks = EXCLUDED.total_chunks, '
+                . 'total_size = EXCLUDED.total_size, '
+                . 'original_filename = EXCLUDED.original_filename, '
+                . 'uploaded_chunks = EXCLUDED.uploaded_chunks, '
+                . 'is_completed = EXCLUDED.is_completed, '
+                . 'final_path = EXCLUDED.final_path, '
+                . 'updated_at = EXCLUDED.updated_at';
         } else {
             $sql = 'INSERT INTO ' . $table . ' '
                 . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
@@ -328,6 +340,17 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
 
     private function quoteIdent(string $identifier): string
     {
-        return $this->quotedColumns[$identifier] ??= '`' . str_replace('`', '``', $identifier) . '`';
+        return $this->quotedColumns[$identifier] ??= $this->quoteForDriver($identifier);
+    }
+
+    private function quoteForDriver(string $identifier): string
+    {
+        $driver = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+
+        if ($driver === 'pgsql' || $driver === 'sqlsrv') {
+            return '"' . str_replace('"', '""', $identifier) . '"';
+        }
+
+        return '`' . str_replace('`', '``', $identifier) . '`';
     }
 }

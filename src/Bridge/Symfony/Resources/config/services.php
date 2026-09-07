@@ -19,11 +19,9 @@ use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
-use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
-use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 use Resumable\ChunkedUploader\Core\UploadManager;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
@@ -67,8 +65,6 @@ return static function (ContainerConfigurator $container): void {
     $services->set(SymfonyEventDispatcherContract::class, EventDispatcher::class);
     $services->set(EventDispatcherInterface::class, SymfonyEventDispatcher::class);
 
-    $services->set(VirusScannerInterface::class, NullVirusScanner::class);
-
     $services->set(MaxChunkSizeRule::class)
         ->arg('$maxBytes', '%chunk_uploader.max_chunk_size%');
     $services->set(MaxTotalSizeRule::class)
@@ -87,7 +83,8 @@ return static function (ContainerConfigurator $container): void {
             service(ChecksumRule::class),
         ]);
 
-    $services->set(ChunkValidatorInterface::class, ChunkSecurityValidator::class);
+    $services->set(ChunkValidatorInterface::class, ChunkSecurityValidator::class)
+        ->arg('$tokenSalt', '%chunk_uploader.token_salt%');
 
     $services->set(StorageDriverFactory::class)
         ->arg('$driver', '%chunk_uploader.storage%')
@@ -113,7 +110,10 @@ return static function (ContainerConfigurator $container): void {
     $services->set(ProgressTrackerInterface::class)
         ->factory([service(MetadataDriverFactory::class), 'createTracker']);
 
-    $services->set(UploadManager::class);
+    $services->set(UploadManager::class)
+        ->arg('$maxChunkAttempts', '%chunk_uploader.rate_limiting.max_attempts%')
+        ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
+        ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%');
 
     $services->alias(UploadManagerInterface::class, UploadManager::class);
     $services->alias('chunk-uploader', UploadManager::class);

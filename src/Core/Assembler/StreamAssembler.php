@@ -111,10 +111,18 @@ final class StreamAssembler implements FileAssemblerInterface
     private function unwrapStream(mixed $stream, int $index): mixed
     {
         if (is_resource($stream)) {
+            @rewind($stream);
             return $stream;
         }
 
         if ($stream instanceof \Psr\Http\Message\StreamInterface) {
+            if (!$stream->isReadable()) {
+                throw new AssemblyException('Chunk stream is not readable for index ' . $index);
+            }
+            if ($stream->isSeekable() && $stream->tell() > 0) {
+                $stream->rewind();
+            }
+
             if (class_exists(\GuzzleHttp\Psr7\StreamWrapper::class)) {
                 $resource = \GuzzleHttp\Psr7\StreamWrapper::getResource($stream);
                 if (is_resource($resource)) {

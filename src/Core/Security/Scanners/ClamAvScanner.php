@@ -11,11 +11,15 @@ use Resumable\ChunkedUploader\Core\Exceptions\VirusDetectedException;
 final class ClamAvScanner implements VirusScannerInterface
 {
     /**
-     * @param string $endpoint UNIX socket path or tcp://host:port endpoint.
-     * @param Closure|null $socketFactory Test seam returning a socket stream resource.
+     * @param string           $endpoint      UNIX socket path or tcp://host:port endpoint.
+     * @param int|float        $timeout       Read/write timeout in seconds for the daemon.
+     * @param Closure|null     $socketFactory Test seam returning a socket stream resource.
      */
-    public function __construct(private readonly string $endpoint = 'tcp://127.0.0.1:3310', private readonly ?Closure $socketFactory = null)
-    {
+    public function __construct(
+        private readonly string $endpoint = 'tcp://127.0.0.1:3310',
+        private readonly int|float $timeout = 30,
+        private readonly ?Closure $socketFactory = null,
+    ) {
     }
 
     /**
@@ -40,7 +44,9 @@ final class ClamAvScanner implements VirusScannerInterface
                 throw new \RuntimeException('ClamAV socket factory did not return a stream.');
             }
 
-            stream_set_timeout($socket, 30);
+            $seconds = (int) $this->timeout;
+            $microseconds = (int) (($this->timeout - $seconds) * 1_000_000);
+            stream_set_timeout($socket, $seconds, $microseconds);
             $this->writeAll($socket, "zINSTREAM\0");
 
             while (!feof($input)) {
@@ -65,7 +71,11 @@ final class ClamAvScanner implements VirusScannerInterface
 
             $response = trim($response);
             if (str_ends_with($response, 'FOUND')) {
-                $virusName = trim((string) preg_replace('/:\s*FOUND$/', '', $response));
+                if (preg_match('/^.*?:\s*(.*?)\s+FOUND$/s', $response, $matches) === 1) {
+                    $virusName = trim($matches[1]);
+                } else {
+                    $virusName = $response;
+                }
                 throw new VirusDetectedException('Virus detected: ' . $virusName);
             }
             if (!str_ends_with($response, 'OK')) {
@@ -92,7 +102,7 @@ final class ClamAvScanner implements VirusScannerInterface
 
         $errorCode = 0;
         $errorMessage = '';
-        $socket = @stream_socket_client($this->endpoint, $errorCode, $errorMessage, 30);
+        $socket = @stream_socket_client($this->endpoint, $errorCode, $errorMessage, $this->timeout);
         if ($socket === false) {
             throw new \RuntimeException('Unable to connect to ClamAV: ' . $errorMessage);
         }

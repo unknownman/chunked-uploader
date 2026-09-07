@@ -13,10 +13,12 @@ use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
 use Resumable\ChunkedUploader\Core\Events\ChunkUploadedEvent;
 use Resumable\ChunkedUploader\Core\Events\FileAssembledEvent;
 use Resumable\ChunkedUploader\Core\Events\UploadFailedEvent;
+use Resumable\ChunkedUploader\Core\Exceptions\RateLimitExceededException;
 use Resumable\ChunkedUploader\Core\Exceptions\UploadFailedException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
@@ -34,6 +36,12 @@ use Throwable;
  */
 final class UploadManager implements UploadManagerInterface
 {
+    /**
+     * @param RateLimiterInterface|null $rateLimiter     Optional chunk-flood guard keyed by client.
+     * @param int|null                  $maxChunkAttempts Maximum accepted chunks per rate-limit window.
+     * @param int                       $rateLimitWindow  Window length in seconds used by the limiter.
+     * @param string                    $rateLimitKey     Request-scoped limiter key (client IP/token).
+     */
     public function __construct(
         private readonly ChunkStorageInterface $storage,
         private readonly MetadataRepositoryInterface $metadata,
@@ -42,11 +50,17 @@ final class UploadManager implements UploadManagerInterface
         private readonly ChunkValidatorInterface $validator,
         private readonly EventDispatcherInterface $dispatcher,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?RateLimiterInterface $rateLimiter = null,
+        private readonly ?int $maxChunkAttempts = null,
+        private readonly int $rateLimitWindow = 60,
+        private readonly string $rateLimitKey = 'chunked-uploader:chunks',
     ) {
     }
 
     public function processChunk(Chunk $chunk): UploadState
     {
+        $this->enforceRateLimit($chunk);
+
         // Step 1: Validate the chunk before any disk I/O.
         try {
             $this->validator->validate($chunk);
@@ -168,6 +182,27 @@ final class UploadManager implements UploadManagerInterface
             $this->logger?->error('Failed to assemble upload', ['error' => $e->getMessage()]);
             $this->dispatchFailure($state, $e);
             throw new UploadFailedException('Assembly failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Guards against chunk-flood denial of service.
+     *
+     * When a rate limiter is configured, each inbound chunk is recorded against
+     * a request-scoped key. Once the configured ceiling is crossed within the
+     * window, the request is rejected before any validation or disk I/O.
+     */
+    private function enforceRateLimit(Chunk $chunk): void
+    {
+        if ($this->rateLimiter === null || $this->maxChunkAttempts === null) {
+            return;
+        }
+
+        $this->rateLimiter->hit($this->rateLimitKey, $this->rateLimitWindow);
+        if ($this->rateLimiter->tooManyAttempts($this->rateLimitKey, $this->maxChunkAttempts)) {
+            throw new RateLimitExceededException(
+                'Chunk upload rejected: rate limit exceeded for ' . $this->rateLimitKey,
+            );
         }
     }
 

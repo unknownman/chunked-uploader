@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- `RedisRateLimiter` now accepts either `ext-redis` (`Redis`) or
+  `predis/predis` (`Predis\ClientInterface`) natively; the bespoke
+  `RedisConnectionInterface` contract was removed.
+- `UploadManager` accepts optional `RateLimiterInterface` and
+  `maxChunkAttempts`/`rateLimitWindow`/`rateLimitKey`, and enforces the rate
+  limit **before** chunk validation and persistence.
+- `ClamAvScanner` gained a `timeout` argument (applied to both the connect and
+  the socket read/write) and a more robust virus-name extraction regex.
+- `PdoMetadataRepository` quoting is now dialect-aware (double quotes for
+  PostgreSQL/SQL Server, backticks elsewhere) and the upsert branches by
+  dialect (`excluded.` for SQLite, `EXCLUDED.` for PostgreSQL, `VALUES()` for
+  MySQL/MariaDB).
+- `S3ChunkStorage::getChunkStream()` validates the returned PSR-7 stream, and
+  `StreamAssembler::unwrapStream()` rewinds native resources and PSR-7 streams
+  via `GuzzleHttp\Psr7\StreamWrapper::getResource()`.
+
+### Added
+- `ChunkSecurityValidator` receives an optional `tokenSalt` for binding tokens
+  to a client fingerprint.
+- Laravel config and provider wiring for `token_salt`, `virus_scanning`
+  (ClamAV host/port) and `rate_limiting` (Redis-backed), each toggled by
+  matching `CHUNK_UPLOADER_*` environment variables.
+- Symfony bundle configuration and DI wiring for the same features, including a
+  new `redis.connection_service` (required when rate limiting is enabled).
+- Tests for `RedisRateLimiter`, `ClamAvScanner` (socket-pair seam), the
+  `UploadManager` rate-limit path, S3 streaming/assembly, the PDO dialect
+  generator, and both framework bridges.
+
+### Fixed
+- Symfony `Configuration` `local` node now calls `addDefaultsIfNotSet()`,
+  avoiding an array-offset-on-null when the config is empty.
+
 ## [1.0.0] - 2026-09-05
 
 ### Added

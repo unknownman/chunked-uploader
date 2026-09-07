@@ -19,6 +19,7 @@ use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
@@ -28,6 +29,8 @@ use Resumable\ChunkedUploader\Core\Drivers\Storage\S3ChunkStorage;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
+use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
 use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 use Resumable\ChunkedUploader\Core\UploadManager;
@@ -115,9 +118,14 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(EventDispatcherInterface::class, LaravelEventDispatcher::class);
-        $this->app->singleton(VirusScannerInterface::class, NullVirusScanner::class);
+        $this->registerVirusScanner();
+        $this->registerRateLimiter();
 
         $this->app->singleton(UploadManager::class, static function ($app): UploadManager {
+            /** @var ConfigRepository $config */
+            $config = app('config');
+            $rateLimiting = (bool) $config->get('chunk-uploader.rate_limiting.enabled');
+
             return new UploadManager(
                 storage: $app->make(ChunkStorageInterface::class),
                 metadata: $app->make(MetadataRepositoryInterface::class),
@@ -128,6 +136,12 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 logger: $app->bound(\Psr\Log\LoggerInterface::class)
                     ? $app->make(\Psr\Log\LoggerInterface::class)
                     : null,
+                rateLimiter: $rateLimiting ? $app->make(RateLimiterInterface::class) : null,
+                maxChunkAttempts: $rateLimiting
+                    ? (int) $config->get('chunk-uploader.rate_limiting.max_attempts')
+                    : null,
+                rateLimitWindow: (int) $config->get('chunk-uploader.rate_limiting.decay_seconds', 60),
+                rateLimitKey: (string) $config->get('chunk-uploader.rate_limiting.key', 'chunked-uploader:chunks'),
             );
         });
 
@@ -139,6 +153,44 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 storage: $app->make(ChunkStorageInterface::class),
                 metadata: $app->make(MetadataRepositoryInterface::class),
                 logger: $app->bound(\Psr\Log\LoggerInterface::class) ? $app->make(\Psr\Log\LoggerInterface::class) : null,
+            );
+        });
+    }
+
+    private function registerVirusScanner(): void
+    {
+        $this->app->singleton(VirusScannerInterface::class, static function (): VirusScannerInterface {
+            /** @var ConfigRepository $config */
+            $config = app('config');
+            $enabled = (bool) $config->get('chunk-uploader.virus_scanning.enabled');
+
+            if (!$enabled) {
+                return new NullVirusScanner();
+            }
+
+            return new ClamAvScanner(
+                endpoint: sprintf(
+                    'tcp://%s:%d',
+                    (string) $config->get('chunk-uploader.virus_scanning.host'),
+                    (int) $config->get('chunk-uploader.virus_scanning.port'),
+                ),
+            );
+        });
+    }
+
+    private function registerRateLimiter(): void
+    {
+        $this->app->singleton(RateLimiterInterface::class, static function (): RateLimiterInterface {
+            /** @var ConfigRepository $config */
+            $config = app('config');
+
+            $client = $config->get('chunk-uploader.redis.client', 'phpredis') === 'predis'
+                ? Redis::connection($config->get('chunk-uploader.redis.connection'))->client()
+                : Redis::connection($config->get('chunk-uploader.redis.connection'))->client();
+
+            return new RedisRateLimiter(
+                redis: $client,
+                prefix: 'rate-limit:',
             );
         });
     }
@@ -233,6 +285,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 pipeline: $pipeline,
                 tokenService: $app->make(UploadTokenService::class),
                 scanner: $app->make(VirusScannerInterface::class),
+                tokenSalt: (string) $config->get('chunk-uploader.token_salt', ''),
             );
         });
     }

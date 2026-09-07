@@ -245,6 +245,11 @@ php artisan vendor:publish --provider="Resumable\ChunkedUploader\Bridge\Laravel\
 Then adjust `config/chunk-uploader.php` (allowed MIME types, spool directory,
 storage driver, etc.).
 
+New in this version: `token_salt` (binds tokens to a client fingerprint),
+`virus_scanning` (ClamAV host/port), and `rate_limiting` (Redis-backed chunk
+flood protection) — all with matching `.env` variable names (see the config
+file for the full list).
+
 **3. Use the Facade**
 
 ```php
@@ -289,21 +294,32 @@ chunk_uploader:
     spool_directory: '%kernel.project_dir%/var/chunked-uploader'
     garbage_collection_ttl: 3600
     token_secret: '%env(APP_SECRET)%'
-    storage: local            # local | s3
+    token_salt: '%env(APP_SECRET)%'       # optional client-fingerprint salt
+    storage: local                         # local | s3
     local:
         base_directory: '%kernel.project_dir%/var/chunked-uploader/chunks'
     s3:
         bucket: 'my-bucket'
         prefix: 'chunks/'
         config: { version: latest, region: eu-west-1, key: ~, secret: ~ }
-    metadata: redis           # redis | pdo
+    metadata: redis                        # redis | pdo
     redis:
-        client: phpredis      # phpredis | predis
+        client: phpredis                   # phpredis | predis
         prefix: 'chunked-uploader:'
         ttl: 0
+        connection_service: 'redis'        # required when rate limiting is enabled
     pdo:
         table: chunked_upload_states
         connection: default
+    virus_scanning:
+        enabled: false
+        host: '127.0.0.1'
+        port: 3310
+    rate_limiting:
+        enabled: false
+        max_attempts: 100
+        decay_seconds: 60
+        key: 'chunked-uploader:chunks'
 ```
 
 **3. Add routes via attribute on the controller**
@@ -423,6 +439,9 @@ browser for a ready-to-run drag-and-drop demo.
 | `spoolDirectory` | `/tmp/chunked-uploader` | Chunk + final assembly dir. |
 | `garbageCollectionTtl` | 3600 s | Incomplete-upload window before GC. |
 | `identifierPattern` | `^[a-zA-Z0-9_-]{1,128}$` | Legal identifier pattern. |
+| `tokenSalt` | `''` | Optional HMAC salt bound to client context. |
+| `virusScanning` | disabled | ClamAV host/port (requires `virus_scanning.enabled: true`). |
+| `rateLimiting` | disabled | Redis-backed chunk-flood guard (`max_attempts`, `decay_seconds`, `key`). |
 
 ---
 
@@ -435,14 +454,17 @@ vendor/bin/phpunit
 
 The full suite runs **completely offline**: all disk I/O uses ephemeral
 temporary files that are cleaned up automatically; storage and metadata are
-in-memory doubles; and Redis, S3, and ClamAV are never contacted. The suite
-covers:
+in-memory doubles (FakeRedis, FakePdo); and Redis, S3, and ClamAV are never
+contacted. The suite covers:
 
 - **Unit tests** against `PathSanitizer`, `MagicByteValidator`,
-  `UploadTokenService`, and `StreamAssembler` (includes a memory ceiling test).
+  `UploadTokenService`, `StreamAssembler` (memory ceiling), `ClamAvScanner`
+  (stream-pair seam), `RedisRateLimiter`, `S3ChunkStorage`, and
+  `PdoMetadataRepository` (with Postgres/MySQL dialect assertions).
 - **Feature tests** for the full sequential upload flow, out-of-order
-  resumable uploads, and interrupted-upload recovery (idempotent retries,
-  resume-from-missing-index, service-restart continuity).
+  resumable uploads, interrupted-upload recovery (idempotent retries,
+  resume-from-missing-index, service-restart continuity), and both the
+  Laravel and Symfony framework bridges.
 
 ## License
 

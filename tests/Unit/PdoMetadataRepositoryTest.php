@@ -11,6 +11,7 @@ use PHPUnit\Framework\Attributes\Test;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Exceptions\MetadataException;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
+use Resumable\ChunkedUploader\Tests\Support\FakePdo;
 use Resumable\ChunkedUploader\Tests\TestCase;
 
 final class PdoMetadataRepositoryTest extends TestCase
@@ -132,6 +133,44 @@ final class PdoMetadataRepositoryTest extends TestCase
         self::assertSame(25.0, $this->repository->getPercentage($state));
         self::assertFalse($this->repository->isComplete($state));
         self::assertSame([1, 2, 3], $this->repository->getMissingChunkIndices($state));
+    }
+
+    #[Test]
+    public function test_postgresql_dialect_uses_double_quoted_identifiers_and_excluded(): void
+    {
+        $pdo = new FakePdo('pgsql');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+        $repository->ensureSchema();
+
+        self::assertStringContainsString('"states"', $pdo->executed[0]);
+        self::assertStringNotContainsString('`', $pdo->executed[0]);
+
+        $repository->save($this->state('pg', [0]));
+        $upsert = end($pdo->prepared);
+
+        self::assertStringContainsString('INSERT INTO "states"', $upsert);
+        self::assertStringContainsString('ON CONFLICT(identifier) DO UPDATE SET', $upsert);
+        self::assertStringContainsString('EXCLUDED.total_chunks', $upsert);
+        self::assertStringNotContainsString('`', $upsert);
+    }
+
+    #[Test]
+    public function test_mysql_dialect_uses_backticks_and_duplicate_key_update(): void
+    {
+        $pdo = new FakePdo('mysql');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+        $repository->ensureSchema();
+
+        self::assertStringContainsString('`states`', $pdo->executed[0]);
+
+        $repository->save($this->state('mysql', [0]));
+        $upsert = end($pdo->prepared);
+
+        self::assertStringContainsString('INSERT INTO `states`', $upsert);
+        self::assertStringContainsString('ON DUPLICATE KEY UPDATE', $upsert);
+        self::assertStringContainsString('VALUES(total_chunks)', $upsert);
+        self::assertStringNotContainsString('EXCLUDED.', $upsert);
+        self::assertStringNotContainsString('"states"', $upsert);
     }
 
     private function state(string $identifier, array $uploaded): UploadState

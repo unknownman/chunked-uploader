@@ -6,7 +6,6 @@ declare(strict_types=1);
 
 namespace Resumable\ChunkedUploader\Tests;
 
-use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase as PHPUnitTestCase;
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
@@ -15,6 +14,7 @@ use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
@@ -113,6 +113,10 @@ abstract class TestCase extends PHPUnitTestCase
         string $secret = 'test-secret',
         string $finalDirectory = 'final',
         ?EventDispatcherInterface $dispatcher = null,
+        ?RateLimiterInterface $rateLimiter = null,
+        ?int $maxChunkAttempts = null,
+        int $rateLimitWindow = 60,
+        string $rateLimitKey = 'chunked-uploader:chunks',
     ): UploadManager {
         $assembler = new StreamAssembler($this->temporaryDirectory . DIRECTORY_SEPARATOR . $finalDirectory);
         return new UploadManager(
@@ -122,6 +126,10 @@ abstract class TestCase extends PHPUnitTestCase
             assembler: $assembler,
             validator: $this->createValidator($secret),
             dispatcher: $dispatcher ?? new NullEventDispatcher(),
+            rateLimiter: $rateLimiter,
+            maxChunkAttempts: $maxChunkAttempts,
+            rateLimitWindow: $rateLimitWindow,
+            rateLimitKey: $rateLimitKey,
         );
     }
 
@@ -192,16 +200,6 @@ abstract class TestCase extends PHPUnitTestCase
             originalFilename: $filename,
             checksum: $checksum,
         );
-    }
-
-    /**
-     * Creates a mock Redis connection implementing RedisConnectionInterface.
-     *
-     * @return MockObject&RedisConnectionInterface
-     */
-    protected function createRedisConnectionMock(): RedisConnectionInterface&MockObject
-    {
-        return $this->createMock(RedisConnectionInterface::class);
     }
 
     /**

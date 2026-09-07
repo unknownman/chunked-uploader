@@ -17,10 +17,15 @@ use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
+use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
+use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
+use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
 use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\TestCase;
@@ -28,6 +33,7 @@ use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
 use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\Reference;
 use Symfony\Component\EventDispatcher\EventDispatcher;
 
 final class SymfonyBridgeTest extends TestCase
@@ -93,6 +99,54 @@ final class SymfonyBridgeTest extends TestCase
         self::assertTrue($container->hasDefinition(MetadataRepositoryInterface::class));
         self::assertTrue($container->hasDefinition(EventDispatcherInterface::class));
         self::assertTrue($container->hasDefinition(CleanupOrphanedChunksCommand::class));
+    }
+
+    #[Test]
+    public function test_extension_registers_a_null_scanner_by_default(): void
+    {
+        $container = new ContainerBuilder();
+        (new ChunkUploaderExtension())->load([], $container);
+
+        self::assertSame(
+            NullVirusScanner::class,
+            $container->getDefinition(VirusScannerInterface::class)->getClass(),
+        );
+        self::assertFalse($container->hasDefinition(RateLimiterInterface::class));
+        self::assertSame('', $container->getParameter('chunk_uploader.token_salt'));
+    }
+
+    #[Test]
+    public function test_extension_wires_clamav_and_rate_limiting_when_enabled(): void
+    {
+        $container = new ContainerBuilder();
+        (new ChunkUploaderExtension())->load([[
+            'virus_scanning' => ['enabled' => true, 'host' => '10.0.0.5', 'port' => 3311],
+            'rate_limiting' => ['enabled' => true, 'max_attempts' => 10, 'decay_seconds' => 30],
+            'redis' => ['connection_service' => 'app.redis'],
+        ]], $container);
+
+        self::assertSame(ClamAvScanner::class, $container->getDefinition(VirusScannerInterface::class)->getClass());
+        $scannerArgs = $container->getDefinition(VirusScannerInterface::class)->getArguments();
+        self::assertSame('tcp://10.0.0.5:3311', $scannerArgs['$endpoint']);
+
+        self::assertTrue($container->hasDefinition(RateLimiterInterface::class));
+        self::assertSame(RedisRateLimiter::class, $container->getDefinition(RateLimiterInterface::class)->getClass());
+        $limiterArgs = $container->getDefinition(RateLimiterInterface::class)->getArguments();
+        self::assertInstanceOf(Reference::class, $limiterArgs['$redis']);
+        self::assertSame('app.redis', (string) $limiterArgs['$redis']);
+        self::assertSame('rate-limit:', $limiterArgs['$prefix']);
+    }
+
+    #[Test]
+    public function test_enabling_rate_limiting_requires_a_redis_connection_service(): void
+    {
+        $container = new ContainerBuilder();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('connection_service');
+        (new ChunkUploaderExtension())->load([
+            ['rate_limiting' => ['enabled' => true]],
+        ], $container);
     }
 
     #[Test]

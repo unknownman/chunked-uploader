@@ -86,6 +86,14 @@ final class S3ChunkStorage implements ChunkStorageInterface
             throw new StorageException('S3 did not return a readable chunk body.');
         }
 
+        if (!$body->isReadable()) {
+            throw new StorageException('S3 returned a non-readable chunk body for key: ' . $key);
+        }
+
+        if ($body->isSeekable() && $body->tell() > 0) {
+            $body->rewind();
+        }
+
         return $body;
     }
 

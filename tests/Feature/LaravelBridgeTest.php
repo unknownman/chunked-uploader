@@ -78,6 +78,15 @@ final class LaravelBridgeTest extends TestCase
         self::assertStringContainsString("'bucket' => env('CHUNK_UPLOADER_S3_BUCKET'", $source);
         self::assertStringContainsString("'prefix' => env('CHUNK_UPLOADER_REDIS_PREFIX'", $source);
         self::assertStringContainsString("'table' => env('CHUNK_UPLOADER_PDO_TABLE'", $source);
+        self::assertStringContainsString("'token_salt' => env('CHUNK_UPLOADER_TOKEN_SALT'", $source);
+        self::assertStringContainsString("'virus_scanning' => [", $source);
+        self::assertStringContainsString("'enabled' => env('CHUNK_UPLOADER_VIRUS_SCANNING'", $source);
+        self::assertStringContainsString("'host' => env('CHUNK_UPLOADER_CLAMAV_HOST'", $source);
+        self::assertStringContainsString("'port' => (int) env('CHUNK_UPLOADER_CLAMAV_PORT'", $source);
+        self::assertStringContainsString("'rate_limiting' => [", $source);
+        self::assertStringContainsString("'max_attempts' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_MAX'", $source);
+        self::assertStringContainsString("'decay_seconds' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_WINDOW'", $source);
+        self::assertStringContainsString("'key' => env('CHUNK_UPLOADER_RATE_LIMIT_KEY'", $source);
     }
 
     #[Test]
