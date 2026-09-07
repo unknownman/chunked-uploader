@@ -19,14 +19,15 @@ use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
 final class MetadataDriverFactory
 {
     /**
-     * @param \Redis|\Predis\ClientInterface|null $redisClient
+    * @param \Redis|\Predis\ClientInterface|null $redisClient
+    * @param PDO|object|null                      $pdo
      */
     public function __construct(
         private readonly string $driver,
         private readonly mixed $redisClient,
         private readonly string $redisPrefix,
         private readonly ?int $redisTtl,
-        private readonly ?PDO $pdo,
+        private readonly mixed $pdo,
         private readonly string $pdoTable,
     ) {
     }
@@ -34,12 +35,13 @@ final class MetadataDriverFactory
     public function create(): MetadataRepositoryInterface
     {
         if ($this->driver === 'pdo') {
-            if ($this->pdo === null) {
+            $pdo = $this->resolvePdo();
+            if ($pdo === null) {
                 throw new \RuntimeException('The PDO metadata driver requires a configured PDO connection.');
             }
 
             $repository = new PdoMetadataRepository(
-                pdo: $this->pdo,
+                pdo: $pdo,
                 tableName: $this->pdoTable,
             );
             $repository->ensureSchema();
@@ -66,5 +68,29 @@ final class MetadataDriverFactory
         }
 
         return $repository;
+    }
+
+    private function resolvePdo(): ?PDO
+    {
+        if ($this->pdo instanceof PDO) {
+            return $this->pdo;
+        }
+
+        if (!is_object($this->pdo)) {
+            return null;
+        }
+
+        foreach (['getNativeConnection', 'getWrappedConnection', 'getPdo'] as $method) {
+            if (!method_exists($this->pdo, $method)) {
+                continue;
+            }
+
+            $connection = $this->pdo->{$method}();
+            if ($connection instanceof PDO) {
+                return $connection;
+            }
+        }
+
+        return null;
     }
 }

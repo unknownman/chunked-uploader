@@ -109,6 +109,9 @@ class ChunkedUploader {
             this._resumeWaiter = null;
             resolve();
         }
+        if (this._running) {
+            return undefined;
+        }
         return this.start();
     }
 
@@ -121,7 +124,7 @@ class ChunkedUploader {
    */
     async missingChunks()
     {
-        const url = `${this.endpoint} / status / ${encodeURIComponent(this.identifier)}`;
+        const url = `${this.endpoint}/status/${encodeURIComponent(this.identifier)}`;
         const response = await fetch(url, { headers: { Accept: 'application/json' } });
         if (response.status === 404) {
             return Array.from({ length: this.totalChunks }, (_, i) => i);
@@ -161,7 +164,7 @@ class ChunkedUploader {
         let lastError;
         for (let attempt = 0; attempt <= this.retryLimit; attempt += 1) {
             if (attempt > 0) {
-                const delay = this.backoffBase * (2 *  * (attempt - 1));
+                const delay = this.backoffBase * (2 ** (attempt - 1));
                 await new Promise((resolve) => setTimeout(resolve, delay));
             }
             try {

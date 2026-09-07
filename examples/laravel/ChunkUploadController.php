@@ -10,6 +10,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use ReflectionMethod;
+use Resumable\ChunkedUploader\Core\Attributes\AllowedMimes;
+use Resumable\ChunkedUploader\Core\Attributes\MaxFileSize;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Configuration\ChunkedUploadConfigResolver;
@@ -73,7 +75,9 @@ final class ChunkUploadController
      * Ingests a single chunk. Idempotent: retrying the same index is safe and
      * the server will neither duplicate bytes nor corrupt the final file.
      */
-    #[ChunkedUpload(maxFileSize: 50 * 1024 * 1024, allowedMimeTypes: ['video/mp4'])]
+    #[ChunkedUpload(tokenSalt: 'media-endpoint')]
+    #[AllowedMimes(['video/mp4'])]
+    #[MaxFileSize(50 * 1024 * 1024)]
     public function store(Request $request): JsonResponse
     {
         $data = Validator::make($request->all(), [

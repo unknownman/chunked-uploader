@@ -11,6 +11,7 @@ use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
+use Resumable\ChunkedUploader\Core\Exceptions\TokenMismatchException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
@@ -76,7 +77,7 @@ final class ChunkSecurityValidator implements ChunkValidatorInterface
                 $config->tokenSalt !== '' ? $config->tokenSalt : $this->tokenSalt,
             )
         ) {
-            throw new SecurityViolationException('Upload token verification failed.');
+            throw new TokenMismatchException('Upload token verification failed.');
         }
 
         $this->pipeline->validate($chunk, $config);

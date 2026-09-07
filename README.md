@@ -451,14 +451,14 @@ method can opt into a narrower immutable configuration for its own uploads:
 
 ```php
 use Resumable\ChunkedUploader\Core\Attributes\ChunkedUpload;
+use Resumable\ChunkedUploader\Core\Attributes\AllowedMimes;
+use Resumable\ChunkedUploader\Core\Attributes\MaxFileSize;
 
 final class MediaController
 {
-    #[ChunkedUpload(
-        maxFileSize: 50 * 1024 * 1024,
-        allowedMimeTypes: ['video/mp4'],
-        tokenSalt: 'media-endpoint',
-    )]
+    #[ChunkedUpload(tokenSalt: 'media-endpoint')]
+    #[AllowedMimes(['video/mp4'])]
+    #[MaxFileSize(50 * 1024 * 1024)]
     public function upload(): void
     {
         // Resolve the method with ChunkedUploadConfigResolver in the bridge,

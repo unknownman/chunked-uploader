@@ -8,6 +8,7 @@ namespace Resumable\ChunkedUploader\Core\Contracts;
 
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
+use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 
 /**
@@ -36,4 +37,6 @@ interface ChunkValidatorInterface
      *                                    traversal attempts in identifiers
      */
     public function validate(Chunk $chunk): bool;
+
+    public function validateWithConfig(Chunk $chunk, UploaderConfig $config): bool;
 }

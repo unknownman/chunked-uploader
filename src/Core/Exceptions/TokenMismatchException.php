@@ -7,6 +7,6 @@ namespace Resumable\ChunkedUploader\Core\Exceptions;
 /**
  * Thrown when an upload token fails verification.
  */
-class TokenMismatchException extends ChunkUploaderException
+class TokenMismatchException extends SecurityViolationException
 {
 }

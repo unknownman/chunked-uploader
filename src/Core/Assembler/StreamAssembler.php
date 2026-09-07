@@ -8,6 +8,7 @@ use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
 use Resumable\ChunkedUploader\Core\Exceptions\AssemblyException;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
+use Resumable\ChunkedUploader\Core\Exceptions\MissingChunkException;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
@@ -56,7 +57,7 @@ final class StreamAssembler implements FileAssemblerInterface
                         throw new AssemblyException('Failed to copy chunk ' . $i . ' to final file');
                     }
                 } catch (ChunkNotFoundException $e) {
-                    throw $e;
+                    throw new MissingChunkException('Missing chunk at index ' . $i, 0, $e);
                 } finally {
                     if (is_resource($in)) {
                         fclose($in);

@@ -6,7 +6,10 @@ namespace Resumable\ChunkedUploader\Core\Configuration;
 
 use ReflectionClass;
 use ReflectionMethod;
+use Resumable\ChunkedUploader\Core\Attributes\AllowedMimes;
 use Resumable\ChunkedUploader\Core\Attributes\ChunkedUpload;
+use Resumable\ChunkedUploader\Core\Attributes\MaxChunkSize;
+use Resumable\ChunkedUploader\Core\Attributes\MaxFileSize;
 
 /** Resolves optional endpoint attributes without coupling the core to a framework. */
 final class ChunkedUploadConfigResolver
@@ -16,35 +19,57 @@ final class ChunkedUploadConfigResolver
      */
     public function resolve(ReflectionMethod|ReflectionClass $endpoint, UploaderConfig $global): UploaderConfig
     {
-        $attribute = $this->attribute($endpoint);
-        if ($attribute === null) {
+        if ($this->attributes($endpoint) === []) {
             return $global;
         }
 
-        return $global->withOverrides(
-            maxFileSize: $attribute->maxFileSize,
-            maxChunkSize: $attribute->maxChunkSize,
-            maxChunks: $attribute->maxChunks,
-            allowedMimeTypes: $attribute->allowedMimeTypes,
-            tokenSalt: $attribute->tokenSalt,
-        );
+        $maxFileSize = null;
+        $maxChunkSize = null;
+        $maxChunks = null;
+        $allowedMimeTypes = null;
+        $tokenSalt = null;
+
+        foreach ($this->attributes($endpoint) as $attribute) {
+            if ($attribute instanceof ChunkedUpload) {
+                $maxFileSize = $attribute->maxFileSize ?? $maxFileSize;
+                $maxChunkSize = $attribute->maxChunkSize ?? $maxChunkSize;
+                $maxChunks = $attribute->maxChunks ?? $maxChunks;
+                $allowedMimeTypes = $attribute->allowedMimeTypes ?? $allowedMimeTypes;
+                $tokenSalt = $attribute->tokenSalt ?? $tokenSalt;
+            } elseif ($attribute instanceof AllowedMimes) {
+                $allowedMimeTypes = $attribute->mimes;
+            } elseif ($attribute instanceof MaxFileSize) {
+                $maxFileSize = $attribute->bytes;
+            } elseif ($attribute instanceof MaxChunkSize) {
+                $maxChunkSize = $attribute->bytes;
+            }
+        }
+
+        return $global->withOverrides($maxFileSize, $maxChunkSize, $maxChunks, $allowedMimeTypes, $tokenSalt);
     }
 
     /**
      * @param ReflectionMethod|ReflectionClass<object> $endpoint
      */
-    private function attribute(ReflectionMethod|ReflectionClass $endpoint): ?ChunkedUpload
+    /**
+     * @param ReflectionMethod|ReflectionClass<object> $endpoint
+     * @return list<ChunkedUpload|AllowedMimes|MaxFileSize|MaxChunkSize>
+     */
+    private function attributes(ReflectionMethod|ReflectionClass $endpoint): array
     {
-        $attributes = $endpoint->getAttributes(ChunkedUpload::class);
-        if ($attributes === []) {
-            return null;
+        $reflectionTargets = $endpoint instanceof ReflectionMethod
+            ? [$endpoint->getDeclaringClass(), $endpoint]
+            : [$endpoint];
+        $resolved = [];
+        foreach ($reflectionTargets as $target) {
+            foreach ($target->getAttributes() as $attribute) {
+                $instance = $attribute->newInstance();
+                if ($instance instanceof ChunkedUpload || $instance instanceof AllowedMimes || $instance instanceof MaxFileSize || $instance instanceof MaxChunkSize) {
+                    $resolved[] = $instance;
+                }
+            }
         }
 
-        $instance = $attributes[0]->newInstance();
-        if (!$instance instanceof ChunkedUpload) {
-            throw new \LogicException('Invalid ChunkedUpload attribute instance.');
-        }
-
-        return $instance;
+        return $resolved;
     }
 }

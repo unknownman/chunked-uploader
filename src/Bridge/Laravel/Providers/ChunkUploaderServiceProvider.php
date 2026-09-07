@@ -195,9 +195,8 @@ class ChunkUploaderServiceProvider extends ServiceProvider
             /** @var ConfigRepository $config */
             $config = app('config');
 
-            $client = $config->get('chunk-uploader.redis.client', 'phpredis') === 'predis'
-                ? Redis::connection($config->get('chunk-uploader.redis.connection'))->client()
-                : Redis::connection($config->get('chunk-uploader.redis.connection'))->client();
+            $connection = Redis::connection($config->get('chunk-uploader.redis.connection'));
+            $client = $connection->client();
 
             return new RedisRateLimiter(
                 redis: $client,
@@ -251,9 +250,8 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 return $repository;
             }
 
-            $client = $config->get('chunk-uploader.redis.client', 'phpredis') === 'predis'
-                ? Redis::connection($config->get('chunk-uploader.redis.connection'))->client()
-                : Redis::connection($config->get('chunk-uploader.redis.connection'))->client();
+            $connection = Redis::connection($config->get('chunk-uploader.redis.connection'));
+            $client = $connection->client();
 
             return new RedisMetadataRepository(
                 redis: $client,

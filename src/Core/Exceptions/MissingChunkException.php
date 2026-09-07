@@ -7,6 +7,6 @@ namespace Resumable\ChunkedUploader\Core\Exceptions;
 /**
  * Raised when a required chunk index is absent during assembly iteration.
  */
-class MissingChunkException extends \RuntimeException
+class MissingChunkException extends AssemblyException
 {
 }

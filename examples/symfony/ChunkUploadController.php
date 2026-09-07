@@ -7,6 +7,8 @@ declare(strict_types=1);
 namespace App\Controller;
 
 use ReflectionMethod;
+use Resumable\ChunkedUploader\Core\Attributes\AllowedMimes;
+use Resumable\ChunkedUploader\Core\Attributes\MaxFileSize;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Configuration\ChunkedUploadConfigResolver;
@@ -75,7 +77,9 @@ final class ChunkUploadController
      * Ingest a single chunk. Idempotent across network retries.
      */
     #[Route('/upload', name: 'upload_store_chunk', methods: ['POST'])]
-    #[ChunkedUpload(maxFileSize: 50 * 1024 * 1024, allowedMimeTypes: ['video/mp4'])]
+    #[ChunkedUpload(tokenSalt: 'media-endpoint')]
+    #[AllowedMimes(['video/mp4'])]
+    #[MaxFileSize(50 * 1024 * 1024)]
     public function store(Request $request): JsonResponse
     {
         $file = $request->files->get('chunk');

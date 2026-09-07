@@ -120,6 +120,14 @@ final class ChunkUploader implements ChunkUploaderInterface
     private function tryAssembleAndFinalize(UploadState $state, Chunk $chunk): UploadState
     {
         try {
+            $current = $this->metadata->get($chunk->identifier);
+            if ($current !== null) {
+                if ($current->finalPath !== null || !$this->progress->isComplete($current)) {
+                    return $current;
+                }
+                $state = $current;
+            }
+
             $finalPath = $this->assembler->assemble($state, $this->storage);
             $this->storage->deleteChunks($chunk->identifier);
             $finalized = $state->withFinalPath($finalPath);

@@ -34,6 +34,8 @@ class ChunkUploaderExtension extends Extension
         $loader = new PhpFileLoader($container, new FileLocator(__DIR__ . '/../Resources/config'));
         $loader->load('services.php');
 
+        $this->wireMetadataConnection($config, $container);
+
         $this->registerSecurityServices($config, $container);
 
         $parameters = [
@@ -117,5 +119,31 @@ class ChunkUploaderExtension extends Extension
         $container->register(RateLimiterInterface::class, RedisRateLimiter::class)
             ->setArgument('$redis', new Reference($connectionService))
             ->setArgument('$prefix', 'rate-limit:');
+    }
+
+    /**
+     * Injects the configured Redis or PDO/DBAL service into the metadata
+     * factory. Empty Redis service IDs remain lazy and fail with a clear error
+     * only when the Redis driver is actually resolved.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function wireMetadataConnection(array $config, ContainerBuilder $container): void
+    {
+        $definition = $container->getDefinition(MetadataDriverFactory::class);
+        $metadataDriver = (string) $config['metadata'];
+
+        if ($metadataDriver === 'redis') {
+            $serviceId = (string) $config['redis']['connection_service'];
+            if ($serviceId !== '') {
+                $definition->setArgument('$redisClient', new Reference($serviceId));
+            }
+            return;
+        }
+
+        $serviceId = (string) $config['pdo']['connection'];
+        if ($serviceId !== '') {
+            $definition->setArgument('$pdo', new Reference($serviceId));
+        }
     }
 }
