@@ -173,6 +173,38 @@ final class PdoMetadataRepositoryTest extends TestCase
         self::assertStringNotContainsString('"states"', $upsert);
     }
 
+    #[Test]
+    public function test_sqlite_opens_write_transactions_with_begin_immediate(): void
+    {
+        $pdo = new FakePdo('sqlite');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $repository->save($this->state('sqlite', [0]));
+        $repository->save($this->state('sqlite-2', [1]));
+
+        $executed = $pdo->executed;
+
+        self::assertSame(2, \count(array_values(array_filter(
+            $executed,
+            static fn (string $sql): bool => $sql === 'BEGIN IMMEDIATE',
+        ))));
+        self::assertSame(2, \count(array_values(array_filter(
+            $executed,
+            static fn (string $sql): bool => $sql === 'COMMIT',
+        ))));
+    }
+
+    #[Test]
+    public function test_non_sqlite_drivers_use_native_transaction_handling(): void
+    {
+        $pdo = new FakePdo('pgsql');
+        $repository = new PdoMetadataRepository($pdo, 'states');
+
+        $repository->save($this->state('pg-txn', [0]));
+
+        self::assertNotContains('BEGIN IMMEDIATE', $pdo->executed);
+    }
+
     private function state(string $identifier, array $uploaded): UploadState
     {
         return new UploadState(

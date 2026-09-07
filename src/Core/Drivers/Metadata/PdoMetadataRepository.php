@@ -64,16 +64,12 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
 
     public function save(UploadState $state): void
     {
+        $this->begin();
         try {
-            $this->pdo->beginTransaction();
-            try {
-                $this->upsert($state);
-                $this->pdo->commit();
-            } catch (\Throwable $e) {
-                $this->pdo->rollBack();
-                throw $e;
-            }
-        } catch (PDOException $e) {
+            $this->upsert($state);
+            $this->end();
+        } catch (\Throwable $e) {
+            $this->abort();
             throw new MetadataException('Unable to write upload state to the database.', 0, $e);
         }
     }
@@ -96,34 +92,28 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
             throw new MetadataException('Chunk index must be zero or greater.');
         }
 
+        $this->begin();
         try {
-            $this->pdo->beginTransaction();
-            try {
-                $row = $this->lockForUpdate($identifier);
-                if ($row === null) {
-                    $this->pdo->rollBack();
-                    throw new MetadataException(
-                        sprintf('Cannot mark chunk %d uploaded: upload "%s" not found.', $chunkIndex, $identifier),
-                    );
-                }
-
-                $state = $this->hydrate($row);
-                $updated = $state->withUploadedChunk($chunkIndex);
-
-                $this->upsert($updated);
-                $this->pdo->commit();
-
-                return $updated;
-            } catch (MetadataException $e) {
-                throw $e;
-            } catch (\Throwable $e) {
-                if ($this->pdo->inTransaction()) {
-                    $this->pdo->rollBack();
-                }
-                throw $e;
+            $row = $this->lockForUpdate($identifier);
+            if ($row === null) {
+                $this->abort();
+                throw new MetadataException(
+                    sprintf('Cannot mark chunk %d uploaded: upload "%s" not found.', $chunkIndex, $identifier),
+                );
             }
-        } catch (PDOException $e) {
-            throw new MetadataException('Unable to atomically advance upload state.', 0, $e);
+
+            $state = $this->hydrate($row);
+            $updated = $state->withUploadedChunk($chunkIndex);
+
+            $this->upsert($updated);
+            $this->end();
+
+            return $updated;
+        } catch (\Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->abort();
+            }
+            throw $e;
         }
     }
 
@@ -207,6 +197,53 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
         } catch (PDOException $e) {
             throw new MetadataException('Unable to create upload-state schema.', 0, $e);
         }
+    }
+
+    /**
+     * Opens a write transaction.
+     *
+     * SQLite defers its write lock by default (`BEGIN DEFERRED`), which surfaces
+     * a "database is locked" error at the first write under concurrency. To
+     * acquire the exclusive write lock eagerly we issue `BEGIN IMMEDIATE`
+     * directly. All other drivers keep PDO's native transaction handling.
+     */
+    private function begin(): void
+    {
+        if ($this->isSqlite()) {
+            $this->pdo->exec('BEGIN IMMEDIATE');
+            return;
+        }
+
+        $this->pdo->beginTransaction();
+    }
+
+    private function end(): void
+    {
+        if ($this->isSqlite()) {
+            $this->pdo->exec('COMMIT');
+            return;
+        }
+
+        $this->pdo->commit();
+    }
+
+    private function abort(): void
+    {
+        if ($this->isSqlite()) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return;
+        }
+
+        if ($this->pdo->inTransaction()) {
+            $this->pdo->rollBack();
+        }
+    }
+
+    private function isSqlite(): bool
+    {
+        return $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
     }
 
     /**

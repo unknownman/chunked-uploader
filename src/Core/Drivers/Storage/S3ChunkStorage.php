@@ -27,6 +27,11 @@ use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 final class S3ChunkStorage implements ChunkStorageInterface
 {
     /**
+     * AWS `DeleteObjects` accepts at most 1000 keys per request.
+     */
+    private const MAX_DELETE_BATCH = 1000;
+
+    /**
      * @param S3Client            $client    Configured S3 client
      * @param string              $bucket    Destination bucket
      * @param string              $basePrefix Object-key namespace (no leading slash)
@@ -115,10 +120,10 @@ final class S3ChunkStorage implements ChunkStorageInterface
                 }
             }
 
-            if ($objects !== []) {
+            foreach (array_chunk($objects, self::MAX_DELETE_BATCH) as $batch) {
                 $this->client->deleteObjects([
                     'Bucket' => $this->bucket,
-                    'Delete' => ['Objects' => $objects],
+                    'Delete' => ['Objects' => $batch],
                 ]);
             }
         } catch (AwsException $e) {
@@ -157,10 +162,12 @@ final class S3ChunkStorage implements ChunkStorageInterface
             }
 
             if ($toDelete !== []) {
-                $this->client->deleteObjects([
-                    'Bucket' => $this->bucket,
-                    'Delete' => ['Objects' => $toDelete],
-                ]);
+                foreach (array_chunk($toDelete, self::MAX_DELETE_BATCH) as $batch) {
+                    $this->client->deleteObjects([
+                        'Bucket' => $this->bucket,
+                        'Delete' => ['Objects' => $batch],
+                    ]);
+                }
                 $removed = count($toDelete);
             }
         } catch (AwsException $e) {

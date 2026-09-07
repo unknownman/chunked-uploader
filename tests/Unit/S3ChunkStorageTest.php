@@ -118,6 +118,53 @@ final class S3ChunkStorageTest extends TestCase
         $storage->getChunkStream($this->chunkFor('track'));
     }
 
+    #[Test]
+    public function test_delete_chunks_batches_the_delete_objects_request_at_1000_keys(): void
+    {
+        $keys = [];
+        for ($i = 0; $i < 2500; $i++) {
+            $keys[] = ['Key' => 'chunks/track/chunk_' . $i . '.part'];
+        }
+
+        $client = new FakeS3Client();
+        $client->on('deleteObjects', static function (array $args): array {
+            return [];
+        });
+        $client->paginate(static fn (): array => ['Contents' => $keys]);
+
+        $storage = new S3ChunkStorage($client, 'uploads');
+        $storage->deleteChunks('track');
+
+        $batches = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'deleteObjects'));
+        self::assertCount(3, $batches);
+        self::assertCount(1000, $batches[0][1][0]['Delete']['Objects']);
+        self::assertCount(1000, $batches[1][1][0]['Delete']['Objects']);
+        self::assertCount(500, $batches[2][1][0]['Delete']['Objects']);
+    }
+
+    #[Test]
+    public function test_clean_orphaned_chunks_batches_the_delete_objects_request_at_1000_keys(): void
+    {
+        $objects = [];
+        for ($i = 0; $i < 2050; $i++) {
+            $objects[] = ['Key' => 'chunks/track/chunk_' . $i . '.part', 'LastModified' => new \DateTimeImmutable('-2 hours')];
+        }
+
+        $client = new FakeS3Client();
+        $client->on('deleteObjects', static fn (array $args): array => []);
+        $client->paginate(static fn (): array => ['Contents' => $objects]);
+
+        $storage = new S3ChunkStorage($client, 'uploads');
+        $removed = $storage->cleanOrphanedChunks(3600);
+
+        $batches = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'deleteObjects'));
+        self::assertSame(2050, $removed);
+        self::assertCount(3, $batches);
+        self::assertCount(1000, $batches[0][1][0]['Delete']['Objects']);
+        self::assertCount(1000, $batches[1][1][0]['Delete']['Objects']);
+        self::assertCount(50, $batches[2][1][0]['Delete']['Objects']);
+    }
+
     private function chunkFor(string $identifier, ?string $path = null): Chunk
     {
         return new Chunk(
@@ -146,6 +193,9 @@ final class FakeS3Client extends S3Client
     /** @var array<string, callable> */
     private array $handlers = [];
 
+    /** @var callable|null */
+    private $pageFactory = null;
+
     public function __construct()
     {
     }
@@ -153,6 +203,19 @@ final class FakeS3Client extends S3Client
     public function on(string $command, callable $handler): void
     {
         $this->handlers[$command] = $handler;
+    }
+
+    public function paginate(callable $pageFactory): void
+    {
+        $this->pageFactory = $pageFactory;
+    }
+
+    public function getPaginator($operation, $args = []): \Iterator
+    {
+        $pageFactory = $this->pageFactory;
+        \assert($pageFactory !== null);
+
+        yield $pageFactory();
     }
 
     public function __call($name, $arguments)

@@ -85,6 +85,29 @@ final class MagicByteValidatorTest extends TestCase
         (new MagicByteValidator())->detectMimeType($this->temporaryDirectory . '/does-not-exist.bin');
     }
 
+    public function test_it_strips_a_charset_suffix_from_the_detected_mime(): void
+    {
+        $finfo = $this->createStub(\finfo::class);
+        $finfo->method('buffer')->willReturn('text/plain; charset=utf-8');
+
+        $validator = new MagicByteValidator(null, $finfo);
+        $path = $this->temporaryFile('hello world');
+
+        self::assertSame('text/plain', $validator->detectMimeType($path));
+        self::assertTrue($validator->validate($path, ['text/plain']));
+    }
+
+    public function test_it_trims_witespace_around_the_base_mime(): void
+    {
+        $finfo = $this->createStub(\finfo::class);
+        $finfo->method('buffer')->willReturn('  application/pdf ; charset=binary  ');
+
+        $validator = new MagicByteValidator(null, $finfo);
+        $path = $this->temporaryFile('anything');
+
+        self::assertSame('application/pdf', $validator->detectMimeType($path));
+    }
+
     #[DataProvider('tamperedPayloads')]
     public function test_it_rejects_tampered_magic_bytes(string $filename, array $extensionMap, string $payload): void
     {

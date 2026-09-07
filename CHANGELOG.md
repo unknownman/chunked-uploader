@@ -33,12 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symfony bundle configuration and DI wiring for the same features, including a
   new `redis.connection_service` (required when rate limiting is enabled).
 - Tests for `RedisRateLimiter`, `ClamAvScanner` (socket-pair seam), the
-  `UploadManager` rate-limit path, S3 streaming/assembly, the PDO dialect
-  generator, and both framework bridges.
+  `UploadManager` rate-limit path, S3 streaming/assembly + >1000-key batching,
+  the PDO dialect generator + SQLite `BEGIN IMMEDIATE`, MIME charset stripping,
+  `LocalChunkStorage`, and both framework bridges.
 
 ### Fixed
 - Symfony `Configuration` `local` node now calls `addDefaultsIfNotSet()`,
   avoiding an array-offset-on-null when the config is empty.
+- `S3ChunkStorage::deleteChunks()` and `cleanOrphanedChunks()` now batch a
+  `DeleteObjects` request at 1000 keys (`array_chunk()`), preventing crashes for
+  files with more than 1000 chunks.
+- `LocalChunkStorage` purges upload directories with `FilesystemIterator`
+  (removing hidden files too) and `store()` `touch()`es the upload directory so
+  the garbage collector's TTL check stays accurate.
+- `PdoMetadataRepository` issues `BEGIN IMMEDIATE` for SQLite so the write lock
+  is acquired eagerly, avoiding deferred-lock "database is locked" concurrency
+  errors; transaction begin/end/rollback is now a dialect-aware helper.
+- `MagicByteValidator::detectMimeType()` strips any `; charset=...` suffix so an
+  allow-list match is not rejected by a finfo-appended parameter.
+- Laravel bridge reads optional `rate_limiting.` and `virus_scanning.` config
+  keys with explicit defaults, so a partially published config cannot raise an
+  undefined-array-key error.
 
 ## [1.0.0] - 2026-09-05
 

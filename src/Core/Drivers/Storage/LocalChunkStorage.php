@@ -11,6 +11,7 @@ use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
 use Resumable\ChunkedUploader\Core\Exceptions\StorageException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use FilesystemIterator;
 use Throwable;
 
 /**
@@ -42,6 +43,10 @@ final class LocalChunkStorage implements ChunkStorageInterface
         if (!is_dir($targetDir) && !@mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
             throw new StorageException('Unable to create upload directory');
         }
+
+        // Guarantee the directory's mtime advances on every accepted chunk so
+        // the Garbage Collector's TTL check stays accurate for chunk spools.
+        @touch($targetDir);
 
         $dest = $targetDir . DIRECTORY_SEPARATOR . 'chunk_' . $chunk->index . '.part';
 
@@ -100,10 +105,10 @@ final class LocalChunkStorage implements ChunkStorageInterface
             return;
         }
 
-        $files = glob($dir . DIRECTORY_SEPARATOR . 'chunk_*.part');
-        if (is_array($files)) {
-            foreach ($files as $file) {
-                @unlink($file);
+        $iterator = new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS);
+        foreach ($iterator as $entry) {
+            if ($entry->isFile() || $entry->isLink()) {
+                @unlink($entry->getPathname());
             }
         }
 

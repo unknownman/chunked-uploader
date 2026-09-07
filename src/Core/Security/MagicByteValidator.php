@@ -25,9 +25,11 @@ final class MagicByteValidator
 
     /**
      * @param UploaderConfig|null $config Configuration supplying the MIME whitelist
+     * @param \finfo|null         $finfo  Optional finfo instance (injectable for tests)
      */
     public function __construct(
         private readonly ?UploaderConfig $config = null,
+        private readonly ?\finfo $finfo = null,
     ) {
     }
 
@@ -51,13 +53,18 @@ final class MagicByteValidator
                 throw new InvalidChunkException('Unable to read file header for MIME inspection.');
             }
 
-            $finfo = new \finfo(FILEINFO_MIME_TYPE);
+            $finfo = $this->finfo ?? new \finfo(FILEINFO_MIME_TYPE);
             $mime = $finfo->buffer($header);
             if ($mime === false || $mime === '') {
                 throw new InvalidChunkException('Unable to detect file MIME type.');
             }
 
-            return $mime;
+            // finfo may append a charset parameter (e.g. "text/plain; charset=utf-8"),
+            // which would otherwise cause false-positive allow-list rejections.
+            // Keep only the trimmed base MIME type.
+            $base = trim(explode(';', $mime)[0]);
+
+            return $base;
         } finally {
             fclose($stream);
         }

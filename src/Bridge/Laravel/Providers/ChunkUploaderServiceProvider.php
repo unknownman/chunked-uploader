@@ -124,7 +124,10 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         $this->app->singleton(UploadManager::class, static function ($app): UploadManager {
             /** @var ConfigRepository $config */
             $config = app('config');
-            $rateLimiting = (bool) $config->get('chunk-uploader.rate_limiting.enabled');
+            $rateLimiting = (bool) $config->get('chunk-uploader.rate_limiting.enabled', false);
+            $rateLimitMax = (int) $config->get('chunk-uploader.rate_limiting.max_attempts', 100);
+            $rateLimitWindow = (int) $config->get('chunk-uploader.rate_limiting.decay_seconds', 60);
+            $rateLimitKey = (string) $config->get('chunk-uploader.rate_limiting.key', 'chunked-uploader:chunks');
 
             return new UploadManager(
                 storage: $app->make(ChunkStorageInterface::class),
@@ -137,11 +140,9 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                     ? $app->make(\Psr\Log\LoggerInterface::class)
                     : null,
                 rateLimiter: $rateLimiting ? $app->make(RateLimiterInterface::class) : null,
-                maxChunkAttempts: $rateLimiting
-                    ? (int) $config->get('chunk-uploader.rate_limiting.max_attempts')
-                    : null,
-                rateLimitWindow: (int) $config->get('chunk-uploader.rate_limiting.decay_seconds', 60),
-                rateLimitKey: (string) $config->get('chunk-uploader.rate_limiting.key', 'chunked-uploader:chunks'),
+                maxChunkAttempts: $rateLimiting ? $rateLimitMax : null,
+                rateLimitWindow: $rateLimitWindow,
+                rateLimitKey: $rateLimitKey,
             );
         });
 
@@ -162,7 +163,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         $this->app->singleton(VirusScannerInterface::class, static function (): VirusScannerInterface {
             /** @var ConfigRepository $config */
             $config = app('config');
-            $enabled = (bool) $config->get('chunk-uploader.virus_scanning.enabled');
+            $enabled = (bool) $config->get('chunk-uploader.virus_scanning.enabled', false);
 
             if (!$enabled) {
                 return new NullVirusScanner();
@@ -171,8 +172,8 @@ class ChunkUploaderServiceProvider extends ServiceProvider
             return new ClamAvScanner(
                 endpoint: sprintf(
                     'tcp://%s:%d',
-                    (string) $config->get('chunk-uploader.virus_scanning.host'),
-                    (int) $config->get('chunk-uploader.virus_scanning.port'),
+                    (string) $config->get('chunk-uploader.virus_scanning.host', '127.0.0.1'),
+                    (int) $config->get('chunk-uploader.virus_scanning.port', 3310),
                 ),
             );
         });
