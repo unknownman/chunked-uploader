@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+// File: src/Bridge/Symfony/DependencyInjection/Configuration.php
+
 namespace Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection;
 
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
@@ -27,6 +29,47 @@ final class Configuration implements ConfigurationInterface
                 ->end()
                 ->scalarNode('spool_directory')->defaultValue('%kernel.project_dir%/var/chunked-uploader')->end()
                 ->integerNode('garbage_collection_ttl')->defaultValue(3600)->end()
+                ->scalarNode('token_secret')->defaultValue('')->end()
+                ->enumNode('storage')->values(['local', 's3'])->defaultValue('local')->end()
+                ->arrayNode('local')
+                    ->children()
+                        ->scalarNode('base_directory')
+                            ->defaultValue('%kernel.project_dir%/var/chunked-uploader/chunks')
+                        ->end()
+                    ->end()
+                ->end()
+                ->arrayNode('s3')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->scalarNode('bucket')->defaultValue('')->end()
+                        ->scalarNode('prefix')->defaultValue('chunks/')->end()
+                        ->arrayNode('config')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('version')->defaultValue('latest')->end()
+                                ->scalarNode('region')->defaultValue('us-east-1')->end()
+                                ->scalarNode('key')->defaultValue('')->end()
+                                ->scalarNode('secret')->defaultValue('')->end()
+                            ->end()
+                        ->end()
+                    ->end()
+                ->end()
+                ->enumNode('metadata')->values(['redis', 'pdo'])->defaultValue('redis')->end()
+                ->arrayNode('redis')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->scalarNode('client')->defaultValue('phpredis')->end()
+                        ->scalarNode('prefix')->defaultValue('chunked-uploader:')->end()
+                        ->integerNode('ttl')->defaultValue(0)->end()
+                    ->end()
+                ->end()
+                ->arrayNode('pdo')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->scalarNode('table')->defaultValue('chunked_upload_states')->end()
+                        ->scalarNode('connection')->defaultValue('default')->end()
+                    ->end()
+                ->end()
             ->end();
 
         return $treeBuilder;

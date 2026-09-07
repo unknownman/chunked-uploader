@@ -8,6 +8,8 @@ namespace Resumable\ChunkedUploader\Tests\Feature;
 
 use PHPUnit\Framework\Attributes\Test;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
+use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
+use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\TestCase;
 
 final class InterruptedUploadRecoveryTest extends TestCase
@@ -19,7 +21,9 @@ final class InterruptedUploadRecoveryTest extends TestCase
         $manager = $sandbox['manager'];
         $storage = $sandbox['storage'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
+        $token = $tokenFactory(3, 3);
 
         // Chunk 0 sent, then the connection drops before the acknowledgment
         // reaches the client. The client retries chunk 0.
@@ -61,7 +65,9 @@ final class InterruptedUploadRecoveryTest extends TestCase
         $sandbox = $this->makeSandbox('upload_drop');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
+        $token = $tokenFactory(4, 4);
 
         // Chunks 0, 1, 3 (of 4) arrive, then the connection drops before chunk 2.
         foreach ([0, 1, 3] as $index) {
@@ -105,13 +111,13 @@ final class InterruptedUploadRecoveryTest extends TestCase
     #[Test]
     public function test_it_recovers_from_a_service_restart_mid_upload_by_reading_persisted_state(): void
     {
-        $storage = new \Resumable\ChunkedUploader\Tests\InMemoryChunkStorage();
-        $metadata = new \Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository();
+        $storage = new InMemoryChunkStorage();
+        $metadata = new InMemoryMetadataRepository();
         $secret = 'test-secret';
 
         // First request cycle: chunk 0 arrives.
         $manager = $this->createManager($storage, $metadata, $secret);
-        $token = (new \Resumable\ChunkedUploader\Core\Drivers\Security\UploadTokenManager($secret))->generateToken('upload_restart');
+        $token = $this->issueToken('upload_restart', 3, 3, '', $secret);
         $manager->processChunk(new Chunk('upload_restart', $token, 0, 3, 1, 3, $this->temporaryFile('A'), 'payload.txt'));
 
         // Simulate a service restart: a brand-new manager is wired over the
@@ -138,8 +144,9 @@ final class InterruptedUploadRecoveryTest extends TestCase
         $sandbox = $this->makeSandbox('upload_dupe');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
 
+        $token = $tokenFactory(3, 3);
         $chunks = [
             0 => 'A',
             1 => 'B',

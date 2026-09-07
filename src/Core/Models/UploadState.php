@@ -14,7 +14,7 @@ final readonly class UploadState
      * @param int $totalChunks
      * @param int $totalSize
      * @param string $originalFilename
-     * @param array $uploadedChunks
+     * @param array<int, int> $uploadedChunks
      * @param bool $isCompleted
      * @param string|null $finalPath
      */

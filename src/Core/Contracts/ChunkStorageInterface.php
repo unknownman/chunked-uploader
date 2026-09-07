@@ -6,6 +6,7 @@ declare(strict_types=1);
 
 namespace Resumable\ChunkedUploader\Core\Contracts;
 
+use Psr\Http\Message\StreamInterface;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
 use Resumable\ChunkedUploader\Core\Exceptions\StorageException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
@@ -52,7 +53,10 @@ interface ChunkStorageInterface
      *
      * @param Chunk $chunk Immutable DTO identifying the chunk to read
      *
-     * @return resource A valid PHP stream resource opened for reading
+     * Concrete drivers may expose either a native PHP stream resource (local
+     * storage) or a PSR-7 StreamInterface (S3), so the return type is a union.
+     *
+     * @return resource|StreamInterface A readable stream over the persisted bytes
      *
      * @throws ChunkNotFoundException when no persisted artifact exists for the chunk
      * @throws StorageException       when the artifact exists but cannot be read

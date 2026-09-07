@@ -63,7 +63,7 @@ flowchart LR
         MD[MetadataRepositoryInterface]
         PT[ProgressTrackerInterface]
         A[FileAssemblerInterface]
-        TS[UploadTokenManager]
+        TS[UploadTokenService]
     end
 
     JS -->|POST /upload token| TS
@@ -83,13 +83,13 @@ Data flow for a single chunk:
 sequenceDiagram
     participant C as Client
     participant M as UploadManager
-    participant TS as TokenManager
+    participant TS as ChunkSecurityValidator
     participant MD as MetadataRepo
     participant S as ChunkStorage
     participant A as Assembler
 
     C->>M: processChunk(Chunk{index, token, ...})
-    M->>TS: verifyToken(identifier, token)
+    M->>TS: validate(chunk)
     TS-->>M: valid
     M->>MD: get(identifier)
     MD-->>M: UploadState|null
@@ -144,37 +144,64 @@ Requirements:
 declare(strict_types=1);
 
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
-use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisProgressTracker;
-use Resumable\ChunkedUploader\Core\Drivers\Security\UploadTokenManager;
+use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
+use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
+use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
+use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
+use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
+use Resumable\ChunkedUploader\Core\Exceptions\ChunkUploaderException;
 
 // 1. Wire the infrastructure.
-$storage = new LocalChunkStorage('/var/lib/my-app/chunks');
+$storage = new LocalChunkStorage('/var/lib/my-app/chunks', new PathSanitizer());
+$metadata = new RedisMetadataRepository(new \Redis(['host' => '127.0.0.1']));
+
 $assembler = new StreamAssembler('/var/lib/my-app/final');
-$tracker = new RedisProgressTracker(new \Redis(['host' => '127.0.0.1']));
+$validator = new ChunkSecurityValidator(
+    sanitizer: new PathSanitizer(),
+    pipeline: new ValidationPipeline([]),
+    tokenService: new UploadTokenService($_ENV['UPLOAD_TOKEN_SECRET']),
+);
 
 // 2. Create the manager once, inject it into your request handler.
 $manager = new UploadManager(
     storage: $storage,
-    metadata: $tracker,
-    progress: $tracker,
+    metadata: $metadata,
+    progress: $metadata,
     assembler: $assembler,
-    tokenManager: new UploadTokenManager($_ENV['UPLOAD_TOKEN_SECRET']),
+    validator: $validator,
+    dispatcher: new class implements EventDispatcherInterface {
+        public function dispatch(object $event): object { return $event; }
+    },
 );
 
-// 3. For each incoming chunk, build a Chunk DTO and process it.
-$state = $manager->processChunk(new Chunk(
-    identifier: 'upload_123',
-    token: $clientToken,           // from UploadTokenService
-    index: 0,
-    totalChunks: 4,
-    chunkSize: filesize($tempFile), // actual byte size of this chunk
-    totalSize: 20_000_000,          // expected total size
-    tmpFilePath: $tempFile,         // from PHP's upload temp dir
-    originalFilename: 'archive.zip',
-));
+// 3. Issue a token bound to the upload signature and client context.
+$token = (new UploadTokenService($_ENV['UPLOAD_TOKEN_SECRET']))
+    ->createToken('upload_123', 4, 20_000_000, 'client-context');
+
+// 4. For each incoming chunk, build a Chunk DTO and process it.
+try {
+    $state = $manager->processChunk(new Chunk(
+        identifier: 'upload_123',
+        token: $token,
+        index: 0,
+        totalChunks: 4,
+        chunkSize: filesize($tempFile), // actual byte size of this chunk
+        totalSize: 20_000_000,          // expected total size
+        tmpFilePath: $tempFile,         // from PHP's upload temp dir
+        originalFilename: 'archive.zip',
+    ));
+} catch (ChunkUploaderException $e) {
+    // validation / storage / assembly failure
+}
 
 // The manager returns the latest upload state; when isCompleted is true the
 // final file has been assembled and temp chunks deleted.
@@ -200,19 +227,19 @@ In `bootstrap/providers.php` (Laravel 11) or `config/app.php` (Laravel 10):
 ```php
 // Laravel 11: bootstrap/providers.php
 return [
-    Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider::class,
+    Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider::class,
 ];
 
 // Laravel 10: config/app.php
 'providers' => [
-    Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider::class,
+    Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider::class,
 ],
 ```
 
 **2. Publish configuration (optional)**
 
 ```bash
-php artisan vendor:publish --provider="Resumable\ChunkedUploader\Bridge\Laravel\ChunkUploaderServiceProvider"
+php artisan vendor:publish --provider="Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider"
 ```
 
 Then adjust `config/chunk-uploader.php` (allowed MIME types, spool directory,
@@ -259,13 +286,24 @@ chunk_uploader:
     max_file_size: 104857600
     max_chunks: 1000
     allowed_mime_types: []
-    spool_directory: '%kernel.project_dir%/var/chunks'
-    storage:
-        driver: local
-        base_dir: '%kernel.project_dir%/var/storage'
-    metadata:
-        driver: redis
-        dsn: 'redis://localhost:6379'
+    spool_directory: '%kernel.project_dir%/var/chunked-uploader'
+    garbage_collection_ttl: 3600
+    token_secret: '%env(APP_SECRET)%'
+    storage: local            # local | s3
+    local:
+        base_directory: '%kernel.project_dir%/var/chunked-uploader/chunks'
+    s3:
+        bucket: 'my-bucket'
+        prefix: 'chunks/'
+        config: { version: latest, region: eu-west-1, key: ~, secret: ~ }
+    metadata: redis           # redis | pdo
+    redis:
+        client: phpredis      # phpredis | predis
+        prefix: 'chunked-uploader:'
+        ttl: 0
+    pdo:
+        table: chunked_upload_states
+        connection: default
 ```
 
 **3. Add routes via attribute on the controller**
@@ -346,6 +384,7 @@ browser for a ready-to-run drag-and-drop demo.
 | --- | --- |
 | `processChunk(Chunk $chunk): UploadState` | Validates the token, persists the chunk, advances progress, and assembles when complete. Idempotent and concurrent-safe. |
 | `cancelUpload(string $identifier): void` | Removes chunks and metadata. Idempotent for unknown identifiers. |
+| `getStatus(string $identifier): ?UploadState` | Reads the current state of an upload, or null if unknown. |
 
 ### `Chunk` (readonly DTO)
 
@@ -362,13 +401,14 @@ browser for a ready-to-run drag-and-drop demo.
 
 | Contract | Methods |
 | --- | --- |
-| `ChunkStorageInterface` | `store`, `getChunkStream`, `deleteChunks` |
-| `MetadataRepositoryInterface` | `save`, `get`, `delete`, `markChunkAsUploaded` |
+| `ChunkStorageInterface` | `store`, `getChunkStream`, `deleteChunks`, `cleanOrphanedChunks` |
+| `MetadataRepositoryInterface` | `save`, `get`, `delete`, `markChunkAsUploaded`, `cleanExpired` |
 | `ProgressTrackerInterface` | `getPercentage`, `isComplete`, `getMissingChunkIndices` |
 | `FileAssemblerInterface` | `assemble(UploadState, ChunkStorageInterface): string` |
 | `ValidationRuleInterface` | `validate(Chunk): void` |
 | `ChunkValidatorInterface` | `validate(Chunk): bool` |
 | `VirusScannerInterface` | `scan(string): void` |
+| `EventDispatcherInterface` | `dispatch(object): object` |
 
 ---
 

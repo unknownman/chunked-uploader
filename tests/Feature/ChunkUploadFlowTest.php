@@ -8,15 +8,18 @@ namespace Resumable\ChunkedUploader\Tests\Feature;
 
 use PHPUnit\Framework\Attributes\Test;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
+use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
-use Resumable\ChunkedUploader\Core\Drivers\Security\UploadTokenManager;
-use Resumable\ChunkedUploader\Core\Exceptions\TokenMismatchException;
+use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
 use Resumable\ChunkedUploader\Core\Exceptions\UploadFailedException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\UploadManager;
 use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
+use Resumable\ChunkedUploader\Tests\NullEventDispatcher;
 use Resumable\ChunkedUploader\Tests\TestCase;
 
 final class ChunkUploadFlowTest extends TestCase
@@ -28,10 +31,11 @@ final class ChunkUploadFlowTest extends TestCase
         $storage = $sandbox['storage'];
         $metadata = $sandbox['metadata'];
         $manager = $sandbox['manager'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
 
         $parts = ['hello ', 'world'];
         $expected = 'hello world';
+        $token = $tokenFactory(count($parts), strlen($expected));
         $lastState = null;
 
         foreach ($parts as $index => $part) {
@@ -63,12 +67,12 @@ final class ChunkUploadFlowTest extends TestCase
         $metadata = new InMemoryMetadataRepository();
         $storage = $this->createMock(ChunkStorageInterface::class);
         $assembler = $this->createMock(FileAssemblerInterface::class);
+        $validator = $this->createValidator();
 
         $assembled = false;
         $storage->expects(self::once())->method('store');
         $storage->expects(self::once())->method('deleteChunks')
             ->willReturnCallback(function () use (&$assembled): void {
-                // deleteChunks must run AFTER assembly produced the final file.
                 self::assertTrue($assembled, 'deleteChunks must be called after assemble completes.');
             });
         $assembler->expects(self::once())->method('assemble')->willReturnCallback(
@@ -83,9 +87,10 @@ final class ChunkUploadFlowTest extends TestCase
             metadata: $metadata,
             progress: $metadata,
             assembler: $assembler,
-            tokenManager: new UploadTokenManager('test-secret'),
+            validator: $validator,
+            dispatcher: new NullEventDispatcher(),
         );
-        $token = (new UploadTokenManager('test-secret'))->generateToken('upload_spy');
+        $token = $this->issueToken('upload_spy', 1, 4);
         $state = $manager->processChunk(new Chunk('upload_spy', $token, 0, 1, 4, 4, $this->temporaryFile('data'), 'payload.txt'));
 
         self::assertTrue($state->isCompleted);
@@ -105,7 +110,8 @@ final class ChunkUploadFlowTest extends TestCase
             metadata: $metadata,
             progress: $metadata,
             assembler: $this->createMock(FileAssemblerInterface::class),
-            tokenManager: new UploadTokenManager('test-secret'),
+            validator: $this->createValidator('test-secret'),
+            dispatcher: new NullEventDispatcher(),
         );
 
         $wrongToken = hash_hmac('sha256', 'upload_tamper', 'wrong-secret');
@@ -120,7 +126,7 @@ final class ChunkUploadFlowTest extends TestCase
             originalFilename: 'payload.txt',
         );
 
-        $this->expectException(TokenMismatchException::class);
+        $this->expectException(SecurityViolationException::class);
         $manager->processChunk($chunk);
     }
 
@@ -140,9 +146,10 @@ final class ChunkUploadFlowTest extends TestCase
             metadata: $metadata,
             progress: $metadata,
             assembler: $assembler,
-            tokenManager: new UploadTokenManager('test-secret'),
+            validator: $this->createValidator('test-secret'),
+            dispatcher: new NullEventDispatcher(),
         );
-        $token = (new UploadTokenManager('test-secret'))->generateToken('upload_fail');
+        $token = $this->issueToken('upload_fail', 1, 4);
 
         $this->expectException(UploadFailedException::class);
         $manager->processChunk(new Chunk('upload_fail', $token, 0, 1, 4, 4, $this->temporaryFile('data'), 'payload.txt'));
@@ -154,10 +161,11 @@ final class ChunkUploadFlowTest extends TestCase
         $sandbox = $this->makeSandbox('upload_progress');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
 
         $parts = ['a', 'b', 'c', 'd'];
         $states = [];
+        $token = $tokenFactory(count($parts), count($parts));
 
         foreach ($parts as $index => $part) {
             $states[] = $manager->processChunk(new Chunk(
@@ -185,8 +193,9 @@ final class ChunkUploadFlowTest extends TestCase
         $manager = $sandbox['manager'];
         $storage = $sandbox['storage'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
 
+        $token = $tokenFactory(3, 3);
         $manager->processChunk(new Chunk('upload_cancel', $token, 0, 3, 1, 3, $this->temporaryFile('a'), 'payload.txt'));
         self::assertTrue($storage->hasChunks('upload_cancel'));
 
@@ -206,5 +215,22 @@ final class ChunkUploadFlowTest extends TestCase
         $manager->cancelUpload('upload_never_started');
 
         self::assertTrue(true);
+    }
+
+    #[Test]
+    public function test_it_dispatches_chunk_uploaded_and_file_assembled_events_on_completion(): void
+    {
+        $sandbox = $this->makeSandbox('upload_events');
+        $manager = $sandbox['manager'];
+        $dispatcher = $sandbox['dispatcher'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
+        $token = $tokenFactory(2, 2);
+        $manager->processChunk(new Chunk('upload_events', $token, 0, 2, 1, 2, $this->temporaryFile('A'), 'payload.txt'));
+        $manager->processChunk(new Chunk('upload_events', $token, 1, 2, 1, 2, $this->temporaryFile('B'), 'payload.txt'));
+
+        $eventClasses = array_map('get_class', $dispatcher->events);
+        self::assertContains(\Resumable\ChunkedUploader\Core\Events\ChunkUploadedEvent::class, $eventClasses);
+        self::assertContains(\Resumable\ChunkedUploader\Core\Events\FileAssembledEvent::class, $eventClasses);
     }
 }

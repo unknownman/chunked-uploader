@@ -2,10 +2,11 @@
 
 declare(strict_types=1);
 
+// File: src/Core/Validation/ChunkSecurityValidator.php
+
 namespace Resumable\ChunkedUploader\Core\Validation;
 
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
-use Resumable\ChunkedUploader\Core\Contracts\ValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
@@ -13,14 +14,25 @@ use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 
-final class ChunkSecurityValidator implements ValidatorInterface, ChunkValidatorInterface
+/**
+ * Composite security validator coordinating identifier hygiene, upload-token
+ * verification, an ordered pipeline of validation rules, and optional malware
+ * scanning (via a {@see VirusScannerInterface}).
+ *
+ * This is the single validator injected into {@see UploadManager}. Identifiers
+ * and filenames are sanitized, the HMAC upload token is verified in constant
+ * time, the pipeline runs (size ceilings, magic bytes, extension/MIME match,
+ * checksum), and finally the scanner inspects the payload. Any violation
+ * short-circuits before a single byte is persisted.
+ */
+final class ChunkSecurityValidator implements ChunkValidatorInterface
 {
     /**
-     * @param PathSanitizer $sanitizer Path and identifier security boundary.
-     * @param ValidationPipeline $pipeline Validation rules.
-     * @param UploadTokenService $tokenService HMAC token verifier.
-     * @param VirusScannerInterface|null $scanner Optional malware scanner.
-     * @param string $tokenSalt Client binding used when tokens are verified.
+     * @param PathSanitizer            $sanitizer   Path and identifier security boundary
+     * @param ValidationPipeline       $pipeline    Ordered validation rules
+     * @param UploadTokenService       $tokenService HMAC token verifier
+     * @param VirusScannerInterface|null $scanner    Optional malware scanner
+     * @param string                   $tokenSalt   Client binding used when tokens are verified
      */
     public function __construct(
         private readonly PathSanitizer $sanitizer,
@@ -34,10 +46,10 @@ final class ChunkSecurityValidator implements ValidatorInterface, ChunkValidator
     /**
      * Validates identifiers, filename, HMAC, configured rules, and malware.
      *
-     * @param Chunk $chunk Chunk to validate.
-     * @return bool True after all checks pass.
-     * @throws InvalidChunkException When chunk metadata is invalid.
-     * @throws SecurityViolationException When a security check fails.
+     * @param Chunk $chunk Chunk to validate
+     * @return bool True after all checks pass
+     * @throws InvalidChunkException      When chunk metadata is invalid
+     * @throws SecurityViolationException When a security check fails
      */
     public function validate(Chunk $chunk): bool
     {
@@ -48,13 +60,15 @@ final class ChunkSecurityValidator implements ValidatorInterface, ChunkValidator
             throw new InvalidChunkException('Chunk metadata is out of range.');
         }
 
-        if (!$this->tokenService->verifyToken(
-            $chunk->token,
-            $chunk->identifier,
-            $chunk->totalChunks,
-            $chunk->totalSize,
-            $this->tokenSalt,
-        )) {
+        if (
+            !$this->tokenService->verifyToken(
+                $chunk->token,
+                $chunk->identifier,
+                $chunk->totalChunks,
+                $chunk->totalSize,
+                $this->tokenSalt,
+            )
+        ) {
             throw new SecurityViolationException('Upload token verification failed.');
         }
 

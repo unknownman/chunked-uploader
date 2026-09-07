@@ -54,10 +54,7 @@ final class StreamAssembler implements FileAssemblerInterface
                 $in = null;
                 try {
                     $in = $storage->getChunkStream($chunkDto);
-                    if (!is_resource($in)) {
-                        throw new AssemblyException('Chunk stream is not a valid resource for index ' . $i);
-                    }
-
+                    $in = $this->unwrapStream($in, $i);
                     stream_set_chunk_size($in, self::BUFFER);
                     stream_set_chunk_size($out, self::BUFFER);
                     $copied = stream_copy_to_stream($in, $out);
@@ -97,5 +94,37 @@ final class StreamAssembler implements FileAssemblerInterface
         $name = basename($name);
         // Replace any remaining unsafe characters
         return preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?: 'file.bin';
+    }
+
+    /**
+     * Converts a storage stream into a native PHP stream resource.
+     *
+     * Local chunk drivers already return a PHP resource; S3 returns a PSR-7
+     * StreamInterface, which is transparently wrapped into a native stream via
+     * Guzzle's StreamWrapper (present with the AWS SDK) so the assembler can use
+     * stream_copy_to_stream() uniformly.
+     *
+     * @param mixed $stream Stream resource or PSR-7 StreamInterface from storage
+     * @param int   $index  Chunk index, for error messages
+     * @return resource Native PHP stream resource
+     */
+    private function unwrapStream(mixed $stream, int $index): mixed
+    {
+        if (is_resource($stream)) {
+            return $stream;
+        }
+
+        if ($stream instanceof \Psr\Http\Message\StreamInterface) {
+            if (class_exists(\GuzzleHttp\Psr7\StreamWrapper::class)) {
+                $resource = \GuzzleHttp\Psr7\StreamWrapper::getResource($stream);
+                if (is_resource($resource)) {
+                    return $resource;
+                }
+            }
+
+            throw new AssemblyException('Unable to wrap PSR-7 chunk stream for index ' . $index);
+        }
+
+        throw new AssemblyException('Chunk stream is not a valid resource for index ' . $index);
     }
 }

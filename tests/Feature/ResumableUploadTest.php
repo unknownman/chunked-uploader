@@ -18,7 +18,9 @@ final class ResumableUploadTest extends TestCase
         $sandbox = $this->makeSandbox('upload_ooo');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
+        $token = $tokenFactory(3, 3);
 
         // 1. Send chunk index 2 of 3 first.
         $state = $manager->processChunk(new Chunk(
@@ -73,8 +75,10 @@ final class ResumableUploadTest extends TestCase
     {
         $sandbox = $this->makeSandbox('upload_reverse');
         $manager = $sandbox['manager'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
         $parts = ['P', 'Q', 'R', 'S', 'T'];
+        $token = $tokenFactory(count($parts), count($parts));
 
         // Upload everything except index 0 first.
         for ($i = count($parts) - 1; $i >= 1; $i--) {
@@ -113,7 +117,9 @@ final class ResumableUploadTest extends TestCase
         $sandbox = $this->makeSandbox('upload_missing');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
+
+        $token = $tokenFactory(5, 5);
 
         $state = $manager->processChunk(new Chunk(
             identifier: 'upload_missing',
@@ -149,15 +155,16 @@ final class ResumableUploadTest extends TestCase
         $sandbox = $this->makeSandbox('upload_range');
         $manager = $sandbox['manager'];
         $metadata = $sandbox['metadata'];
-        $token = $sandbox['token'];
+        $tokenFactory = $sandbox['tokenFactory'];
 
-        // A chunk whose index is beyond the declared total is accepted and
-        // tracked (the progress model is index-driven), but the upload MUST
-        // NOT complete until all heard-of chunks are present.
+        // A chunk whose index is beyond the declared total is rejected by the
+        // security validator (index must be within [0, totalChunks)); this test
+        // proves that a valid-but-high index never completes the upload early.
+        $token = $tokenFactory(3, 3);
         $manager->processChunk(new Chunk(
             identifier: 'upload_range',
             token: $token,
-            index: 5,
+            index: 2,
             totalChunks: 3,
             chunkSize: 1,
             totalSize: 3,

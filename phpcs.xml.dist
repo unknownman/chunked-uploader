@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<ruleset name="resumable/chunked-uploader">
+    <description>PSR-12 coding standard for the chunked uploader package.</description>
+
+    <file>src</file>
+    <file>tests</file>
+    <file>examples/laravel</file>
+    <file>examples/symfony</file>
+
+    <arg name="colors"/>
+    <arg value="p"/>
+
+    <rule ref="PSR12"/>
+
+    <!--
+        Long lines are informational here; wrapping every fluent DI/service
+        chain below 120 columns hurts readability for little gain.
+    -->
+    <rule ref="Generic.Files.LineLength">
+        <severity>0</severity>
+    </rule>
+
+    <!--
+        Test classes intentionally use snake_case method names to mirror the
+        {@see PHPUnit\Framework\Attributes\Test} human-readable descriptions
+        (e.g. test_it_resumes_after_a_network_interruption).
+    -->
+    <rule ref="PSR1.Methods.CamelCapsMethodName">
+        <severity>0</severity>
+    </rule>
+
+    <!--
+        tests/TestCase.php groups the in-memory production doubles with the
+        shared base test case for cohesion.
+    -->
+    <rule ref="PSR1.Classes.ClassDeclaration.MultipleClasses">
+        <severity>0</severity>
+    </rule>
+</ruleset>

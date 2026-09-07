@@ -10,14 +10,18 @@ use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase as PHPUnitTestCase;
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
+use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
-use Resumable\ChunkedUploader\Core\Contracts\RedisConnectionInterface;
-use Resumable\ChunkedUploader\Core\Drivers\Security\UploadTokenManager;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
+use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
 use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
+use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
 
 /**
  * Base test case for the chunked uploader suite.
@@ -62,6 +66,14 @@ abstract class TestCase extends PHPUnitTestCase
     }
 
     /**
+     * Returns the per-test sandbox directory.
+     */
+    protected function tempDir(): string
+    {
+        return $this->temporaryDirectory;
+    }
+
+    /**
      * Returns a conveniently large deterministic payload for memory tests.
      */
     protected function payload(int $megabytes, string $byte = 'A'): string
@@ -90,12 +102,17 @@ abstract class TestCase extends PHPUnitTestCase
 
     /**
      * Builds a production UploadManager wired to in-memory doubles.
+     *
+     * The validator is a real {@see ChunkSecurityValidator} configured with the
+     * given secret so token validation behaves exactly as in production, and the
+     * dispatcher is a no-op recording dispatcher by default.
      */
     protected function createManager(
         InMemoryChunkStorage $storage,
         InMemoryMetadataRepository $metadata,
         string $secret = 'test-secret',
         string $finalDirectory = 'final',
+        ?EventDispatcherInterface $dispatcher = null,
     ): UploadManager {
         $assembler = new StreamAssembler($this->temporaryDirectory . DIRECTORY_SEPARATOR . $finalDirectory);
         return new UploadManager(
@@ -103,15 +120,30 @@ abstract class TestCase extends PHPUnitTestCase
             metadata: $metadata,
             progress: $metadata,
             assembler: $assembler,
-            tokenManager: new UploadTokenManager($secret),
+            validator: $this->createValidator($secret),
+            dispatcher: $dispatcher ?? new NullEventDispatcher(),
+        );
+    }
+
+    /**
+     * Returns a real composite chunk validator wired with an empty pipeline and
+     * the supplied token secret, so token checks are enforced in tests.
+     */
+    protected function createValidator(string $secret = 'test-secret'): ChunkValidatorInterface
+    {
+        $sanitizer = new PathSanitizer();
+        return new ChunkSecurityValidator(
+            sanitizer: $sanitizer,
+            pipeline: new ValidationPipeline([]),
+            tokenService: new UploadTokenService($secret),
         );
     }
 
     /**
      * Returns a fully wired in-memory sandbox with an already-constructed
-     * manager, storage, metadata, and a freshly issued token.
+     * manager, storage, metadata, and a token factory for the upload.
      *
-     * @return array{manager: UploadManager, storage: InMemoryChunkStorage, metadata: InMemoryMetadataRepository, token: string}
+     * @return array{manager: UploadManager, storage: InMemoryChunkStorage, metadata: InMemoryMetadataRepository, tokenFactory: \Closure(int,int):string, dispatcher: NullEventDispatcher}
      */
     protected function makeSandbox(
         string $identifier = 'upload_test',
@@ -119,14 +151,18 @@ abstract class TestCase extends PHPUnitTestCase
     ): array {
         $storage = new InMemoryChunkStorage();
         $metadata = new InMemoryMetadataRepository();
-        $manager = $this->createManager($storage, $metadata, $secret);
-        $token = (new UploadTokenManager($secret))->generateToken($identifier);
+        $dispatcher = new NullEventDispatcher();
+        $manager = $this->createManager($storage, $metadata, $secret, 'final', $dispatcher);
+        $tokenService = new UploadTokenService($secret);
+        $tokenFactory = static fn (int $totalChunks, int $totalSize): string =>
+            $tokenService->createToken($identifier, $totalChunks, $totalSize);
 
         return [
             'manager' => $manager,
             'storage' => $storage,
             'metadata' => $metadata,
-            'token' => $token,
+            'tokenFactory' => $tokenFactory,
+            'dispatcher' => $dispatcher,
         ];
     }
 
@@ -167,6 +203,19 @@ abstract class TestCase extends PHPUnitTestCase
     {
         return $this->createMock(RedisConnectionInterface::class);
     }
+
+    /**
+     * Issues a token for the given upload signature using the test secret.
+     */
+    protected function issueToken(
+        string $identifier,
+        int $totalChunks,
+        int $totalSize,
+        string $salt = '',
+        string $secret = 'test-secret',
+    ): string {
+        return (new UploadTokenService($secret))->createToken($identifier, $totalChunks, $totalSize, $salt);
+    }
 }
 
 /**
@@ -181,6 +230,9 @@ class InMemoryChunkStorage implements ChunkStorageInterface
 {
     /** @var array<string, array<int, string>> */
     private array $files = [];
+
+    /** @var array<string, int> Last write timestamp per uploaded artifact */
+    private array $timestamps = [];
 
     public function __destruct()
     {
@@ -199,6 +251,7 @@ class InMemoryChunkStorage implements ChunkStorageInterface
             throw new \RuntimeException('Unable to store test chunk.');
         }
         $this->files[$chunk->identifier][$chunk->index] = $path;
+        $this->timestamps[$chunk->identifier][$chunk->index] = time();
     }
 
     public function getChunkStream(Chunk $chunk): mixed
@@ -219,12 +272,40 @@ class InMemoryChunkStorage implements ChunkStorageInterface
         foreach ($this->files[$identifier] ?? [] as $path) {
             @unlink($path);
         }
-        unset($this->files[$identifier]);
+        unset($this->files[$identifier], $this->timestamps[$identifier]);
+    }
+
+    public function cleanOrphanedChunks(int $ttlSeconds): int
+    {
+        $now = time();
+        $removed = 0;
+        foreach (array_keys($this->files) as $identifier) {
+            $oldest = $this->timestamps[$identifier] ?? $now;
+            foreach ($this->timestamps[$identifier] ?? [] as $ts) {
+                $oldest = min($oldest, $ts);
+            }
+            if ($oldest + $ttlSeconds <= $now) {
+                $count = count($this->files[$identifier] ?? []);
+                $this->deleteChunks($identifier);
+                $removed += $count;
+            }
+        }
+        return $removed;
     }
 
     public function hasChunks(string $identifier): bool
     {
         return isset($this->files[$identifier]) && $this->files[$identifier] !== [];
+    }
+
+    /**
+     * Back-dates a stored artifact's timestamp to simulate staleness.
+     */
+    public function ageChunks(string $identifier, int $seconds): void
+    {
+        foreach (array_keys($this->timestamps[$identifier] ?? []) as $index) {
+            $this->timestamps[$identifier][$index] = time() - $seconds;
+        }
     }
 }
 
@@ -237,9 +318,13 @@ final class InMemoryMetadataRepository implements MetadataRepositoryInterface, P
     /** @var array<string, UploadState> */
     private array $states = [];
 
+    /** @var array<string, int> Last write time per upload */
+    private array $updatedAt = [];
+
     public function save(UploadState $state): void
     {
         $this->states[$state->identifier] = $state;
+        $this->updatedAt[$state->identifier] = time();
     }
 
     public function get(string $identifier): ?UploadState
@@ -249,7 +334,7 @@ final class InMemoryMetadataRepository implements MetadataRepositoryInterface, P
 
     public function delete(string $identifier): void
     {
-        unset($this->states[$identifier]);
+        unset($this->states[$identifier], $this->updatedAt[$identifier]);
     }
 
     public function markChunkAsUploaded(string $identifier, int $chunkIndex): UploadState
@@ -257,7 +342,21 @@ final class InMemoryMetadataRepository implements MetadataRepositoryInterface, P
         $state = $this->states[$identifier] ?? throw new \RuntimeException('Missing test state.');
         $state = $state->withUploadedChunk($chunkIndex);
         $this->states[$identifier] = $state;
+        $this->updatedAt[$identifier] = time();
         return $state;
+    }
+
+    public function cleanExpired(int $ttlSeconds): int
+    {
+        $cutoff = time() - $ttlSeconds;
+        $removed = 0;
+        foreach ($this->updatedAt as $identifier => $ts) {
+            if ($ts <= $cutoff) {
+                $this->delete($identifier);
+                $removed++;
+            }
+        }
+        return $removed;
     }
 
     public function getPercentage(UploadState $state): float
@@ -273,5 +372,28 @@ final class InMemoryMetadataRepository implements MetadataRepositoryInterface, P
     public function getMissingChunkIndices(UploadState $state): array
     {
         return array_values(array_diff(range(0, $state->totalChunks - 1), $state->uploadedChunks));
+    }
+
+    public function ageState(string $identifier, int $seconds): void
+    {
+        if (isset($this->updatedAt[$identifier])) {
+            $this->updatedAt[$identifier] = time() - $seconds;
+        }
+    }
+}
+
+/**
+ * No-op, in-memory event dispatcher recording every dispatched event for
+ * assertions without requiring a real PSR-14 implementation.
+ */
+final class NullEventDispatcher implements EventDispatcherInterface
+{
+    /** @var list<object> */
+    public array $events = [];
+
+    public function dispatch(object $event): object
+    {
+        $this->events[] = $event;
+        return $event;
     }
 }
