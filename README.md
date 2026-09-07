@@ -1,4 +1,3 @@
-<!-- [GEMINI PROMPT: Generate a sleek, modern SVG banner for a PHP package named "Resumable Chunked Uploader". Theme: Fast, secure data streams, blue/purple gradient, technical/backend aesthetic. Save as docs/banner.svg] -->
 ![Resumable Chunked Uploader](docs/banner.svg)
 
 <!--
