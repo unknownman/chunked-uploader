@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RedisRateLimiter` now accepts either `ext-redis` (`Redis`) or
   `predis/predis` (`Predis\ClientInterface`) natively; the bespoke
   `RedisConnectionInterface` contract was removed.
-- `UploadManager` accepts optional `RateLimiterInterface` and
+- `ChunkUploader` accepts optional `RateLimiterInterface` and
   `maxChunkAttempts`/`rateLimitWindow`/`rateLimitKey`, and enforces the rate
   limit **before** chunk validation and persistence.
 - `ClamAvScanner` gained a `timeout` argument (applied to both the connect and
@@ -25,8 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `GuzzleHttp\Psr7\StreamWrapper::getResource()`.
 
 ### Added
-- Canonical `ChunkUploader` and `ChunkUploaderInterface` coordinator names,
-  with deprecated `UploadManager` compatibility aliases.
+- Canonical `ChunkUploader` and `ChunkUploaderInterface` coordinator names.
 - Optional PHP 8 `ChunkedUpload` attributes and
   `ChunkedUploadConfigResolver` for endpoint-specific limits, MIME allow-lists,
   and token salts.
@@ -40,12 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symfony bundle configuration and DI wiring for the same features, including a
   new `redis.connection_service` (required when rate limiting is enabled).
 - Tests for `RedisRateLimiter`, `ClamAvScanner` (socket-pair seam), the
-  `UploadManager` rate-limit path, S3 streaming/assembly + >1000-key batching,
+  `ChunkUploader` rate-limit path, S3 streaming/assembly + >1000-key batching,
   the PDO dialect generator + SQLite `BEGIN IMMEDIATE`, MIME charset stripping,
   `LocalChunkStorage`, and both framework bridges.
 
 ### Fixed
-- `UploadManager` now rolls back the persisted chunk artifact when the metadata
+- `ChunkUploader` now rolls back the persisted chunk artifact when the metadata
   progress mutation fails, without masking the original failure if cleanup also
   fails.
 - Laravel no longer resolves Redis or ClamAV services when their features are
@@ -79,13 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Core engine
-- Framework-agnostic `UploadManager` as the sole coordinator of the
+- Framework-agnostic `ChunkUploader` as the sole coordinator of the
   chunked-upload lifecycle: token/integrity validation, chunk persistence,
   atomic progress, and streaming assembly, with a `GarbageCollector` for
   orphaned-chunk and expired-metadata reclamation.
 - Immutable `Chunk` and `UploadState` data-transfer objects plus the
   `UploaderConfig` DTO parsed by each framework bridge.
-- `UploadManagerInterface` with `processChunk()`, `cancelUpload()`, and
+- `ChunkUploaderInterface` with `processChunk()`, `cancelUpload()`, and
   `getStatus()`.
 
 #### Streaming assembly

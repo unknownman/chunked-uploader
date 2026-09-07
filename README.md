@@ -1,3 +1,4 @@
+<!-- [GEMINI PROMPT: Generate a sleek, modern SVG banner for a PHP package named "Resumable Chunked Uploader". Theme: Fast, secure data streams, blue/purple gradient, technical/backend aesthetic. Save as docs/banner.svg] -->
 ![Resumable Chunked Uploader](docs/banner.svg)
 
 <!--
@@ -55,8 +56,7 @@ large it is.
     fails, so transient database errors do not create permanent orphan bytes.
 - **Bounded cleanup** scans local directories, S3 pages, Redis cursors, and PDO
     rows incrementally, including S3 deletion batches larger than 1,000 objects.
-- **`ChunkUploader`** is the canonical coordinator; `UploadManager` remains a
-    deprecated compatibility alias for existing 1.x applications.
+- **`ChunkUploader`** is the single canonical coordinator.
 - **Optional PHP 8 attributes** provide endpoint-specific immutable config
     overrides without changing global defaults.
 - **Flysystem v3** storage is available as an optional driver.
@@ -74,7 +74,7 @@ flowchart LR
     end
 
     subgraph Server
-        M[UploadManager]
+        M[ChunkUploader]
         V[ValidationPipeline]
         S[ChunkStorageInterface]
         MD[MetadataRepositoryInterface]
@@ -99,7 +99,7 @@ Data flow for a single chunk:
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant M as UploadManager
+    participant M as ChunkUploader
     participant TS as ChunkSecurityValidator
     participant MD as MetadataRepo
     participant S as ChunkStorage
@@ -166,7 +166,7 @@ use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
-use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
 use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
@@ -189,7 +189,7 @@ $validator = new ChunkSecurityValidator(
 );
 
 // 2. Create the manager once, inject it into your request handler.
-$manager = new UploadManager(
+$manager = new ChunkUploader(
     storage: $storage,
     metadata: $metadata,
     progress: $metadata,
@@ -411,7 +411,7 @@ browser for a ready-to-run drag-and-drop demo.
 
 ## API reference
 
-### `UploadManagerInterface`
+### `ChunkUploaderInterface`
 
 | Method | Description |
 | --- | --- |

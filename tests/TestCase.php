@@ -19,7 +19,7 @@ use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
-use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
 use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
 
@@ -28,7 +28,7 @@ use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
  *
  * Configures a self-cleaning temporary filesystem directory per test, exposes
  * in-memory production doubles for storage and metadata, and provides helpers
- * for spinning up a configured UploadManager and constructing Chunk fixtures.
+ * for spinning up a configured ChunkUploader and constructing Chunk fixtures.
  * No real Redis server, S3 bucket, or ClamAV daemon is ever contacted.
  */
 abstract class TestCase extends PHPUnitTestCase
@@ -101,7 +101,7 @@ abstract class TestCase extends PHPUnitTestCase
     }
 
     /**
-     * Builds a production UploadManager wired to in-memory doubles.
+    * Builds a production ChunkUploader wired to in-memory doubles.
      *
      * The validator is a real {@see ChunkSecurityValidator} configured with the
      * given secret so token validation behaves exactly as in production, and the
@@ -117,9 +117,9 @@ abstract class TestCase extends PHPUnitTestCase
         ?int $maxChunkAttempts = null,
         int $rateLimitWindow = 60,
         string $rateLimitKey = 'chunked-uploader:chunks',
-    ): UploadManager {
+    ): ChunkUploader {
         $assembler = new StreamAssembler($this->temporaryDirectory . DIRECTORY_SEPARATOR . $finalDirectory);
-        return new UploadManager(
+        return new ChunkUploader(
             storage: $storage,
             metadata: $metadata,
             progress: $metadata,
@@ -151,7 +151,7 @@ abstract class TestCase extends PHPUnitTestCase
      * Returns a fully wired in-memory sandbox with an already-constructed
      * manager, storage, metadata, and a token factory for the upload.
      *
-     * @return array{manager: UploadManager, storage: InMemoryChunkStorage, metadata: InMemoryMetadataRepository, tokenFactory: \Closure(int,int):string, dispatcher: NullEventDispatcher}
+    * @return array{manager: ChunkUploader, storage: InMemoryChunkStorage, metadata: InMemoryMetadataRepository, tokenFactory: \Closure(int,int):string, dispatcher: NullEventDispatcher}
      */
     protected function makeSandbox(
         string $identifier = 'upload_test',

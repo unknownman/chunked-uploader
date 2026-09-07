@@ -21,12 +21,10 @@ use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
-use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
-use Resumable\ChunkedUploader\Core\UploadManager;
 use Resumable\ChunkedUploader\Core\Validation\ChunkSecurityValidator;
 use Resumable\ChunkedUploader\Core\Validation\Rules\ChecksumRule;
 use Resumable\ChunkedUploader\Core\Validation\Rules\ExtensionMimeMatchRule;
@@ -121,15 +119,7 @@ return static function (ContainerConfigurator $container): void {
         ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
         ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%');
 
-    // Retain the concrete legacy service for applications that explicitly
-    // request UploadManager; all package aliases resolve to ChunkUploader.
-    $services->set(UploadManager::class)
-        ->arg('$maxChunkAttempts', '%chunk_uploader.rate_limiting.max_attempts%')
-        ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
-        ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%');
-
     $services->alias(ChunkUploaderInterface::class, ChunkUploader::class);
-    $services->alias(UploadManagerInterface::class, ChunkUploader::class);
     $services->alias('chunk-uploader', ChunkUploader::class);
 
     $services->set(GarbageCollector::class);

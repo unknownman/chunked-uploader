@@ -23,7 +23,6 @@ use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
-use Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
@@ -90,6 +89,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 allowedMimeTypes: (array) $config->get('chunk-uploader.allowed_mime_types'),
                 spoolDirectory: (string) $config->get('chunk-uploader.spool_directory'),
                 garbageCollectionTtl: (int) $config->get('chunk-uploader.garbage_collection_ttl'),
+                tokenSalt: (string) $config->get('chunk-uploader.token_salt', ''),
             );
         });
     }
@@ -150,7 +150,6 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(ChunkUploader::class, ChunkUploaderInterface::class);
-        $this->app->alias(ChunkUploader::class, UploadManagerInterface::class);
         $this->app->alias(ChunkUploader::class, 'chunk-uploader');
 
         $this->app->singleton(GarbageCollector::class, static function ($app): GarbageCollector {

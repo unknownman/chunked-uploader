@@ -20,7 +20,7 @@ use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
  * verification, an ordered pipeline of validation rules, and optional malware
  * scanning (via a {@see VirusScannerInterface}).
  *
- * This is the single validator injected into {@see UploadManager}. Identifiers
+ * This is the single validator injected into {@see ChunkUploader}. Identifiers
  * and filenames are sanitized, the HMAC upload token is verified in constant
  * time, the pipeline runs (size ceilings, magic bytes, extension/MIME match,
  * checksum), and finally the scanner inspects the payload. Any violation

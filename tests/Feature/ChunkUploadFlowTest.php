@@ -16,7 +16,7 @@ use Resumable\ChunkedUploader\Core\Exceptions\SecurityViolationException;
 use Resumable\ChunkedUploader\Core\Exceptions\UploadFailedException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
-use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\NullEventDispatcher;
@@ -82,7 +82,7 @@ final class ChunkUploadFlowTest extends TestCase
             },
         );
 
-        $manager = new UploadManager(
+        $manager = new ChunkUploader(
             storage: $storage,
             metadata: $metadata,
             progress: $metadata,
@@ -105,7 +105,7 @@ final class ChunkUploadFlowTest extends TestCase
         $storage->expects(self::never())->method('store');
         $storage->expects(self::never())->method('deleteChunks');
 
-        $manager = new UploadManager(
+        $manager = new ChunkUploader(
             storage: $storage,
             metadata: $metadata,
             progress: $metadata,
@@ -141,7 +141,7 @@ final class ChunkUploadFlowTest extends TestCase
         $assembler->expects(self::once())->method('assemble')
             ->willThrowException(new \RuntimeException('disk full'));
 
-        $manager = new UploadManager(
+        $manager = new ChunkUploader(
             storage: $storage,
             metadata: $metadata,
             progress: $metadata,

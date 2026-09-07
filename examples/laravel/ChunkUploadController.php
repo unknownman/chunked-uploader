@@ -9,13 +9,17 @@ namespace App\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use ReflectionMethod;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Configuration\ChunkedUploadConfigResolver;
+use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkUploaderException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 use Resumable\ChunkedUploader\Core\Security\UploadTokenService;
-use Resumable\ChunkedUploader\Core\UploadManager;
+use Resumable\ChunkedUploader\Core\ChunkUploader;
+use Resumable\ChunkedUploader\Core\Attributes\ChunkedUpload;
 
 /**
  * Minimal, copy-pasteable Laravel controller exposing the chunked upload
@@ -30,11 +34,13 @@ use Resumable\ChunkedUploader\Core\UploadManager;
 final class ChunkUploadController
 {
     public function __construct(
-        private readonly UploadManager $uploader,
+        private readonly ChunkUploader $uploader,
         private readonly MetadataRepositoryInterface $metadata,
         private readonly ProgressTrackerInterface $progress,
         private readonly PathSanitizer $sanitizer,
         private readonly UploadTokenService $tokens,
+        private readonly UploaderConfig $config,
+        private readonly ChunkedUploadConfigResolver $configResolver,
     ) {
     }
 
@@ -67,6 +73,7 @@ final class ChunkUploadController
      * Ingests a single chunk. Idempotent: retrying the same index is safe and
      * the server will neither duplicate bytes nor corrupt the final file.
      */
+    #[ChunkedUpload(maxFileSize: 50 * 1024 * 1024, allowedMimeTypes: ['video/mp4'])]
     public function store(Request $request): JsonResponse
     {
         $data = Validator::make($request->all(), [
@@ -98,7 +105,8 @@ final class ChunkUploadController
         );
 
         try {
-            $state = $this->uploader->processChunk($chunk);
+            $config = $this->configResolver->resolve(new ReflectionMethod(self::class, __FUNCTION__), $this->config);
+            $state = $this->uploader->processChunk($chunk, $config);
         } catch (ChunkUploaderException $e) {
             return response()->json(['error' => $e->getMessage()], 422);
         }

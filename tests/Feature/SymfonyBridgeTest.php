@@ -93,8 +93,8 @@ final class SymfonyBridgeTest extends TestCase
 
         self::assertSame(7200, $container->getParameter('chunk_uploader.garbage_collection_ttl'));
         self::assertSame('secret-value', $container->getParameter('chunk_uploader.token_secret'));
-        self::assertTrue($container->hasDefinition(\Resumable\ChunkedUploader\Core\UploadManager::class));
-        self::assertTrue($container->has(\Resumable\ChunkedUploader\Core\Contracts\UploadManagerInterface::class));
+        self::assertTrue($container->hasDefinition(\Resumable\ChunkedUploader\Core\ChunkUploader::class));
+        self::assertTrue($container->has(\Resumable\ChunkedUploader\Core\Contracts\ChunkUploaderInterface::class));
         self::assertTrue($container->hasDefinition(ChunkStorageInterface::class));
         self::assertTrue($container->hasDefinition(MetadataRepositoryInterface::class));
         self::assertTrue($container->hasDefinition(EventDispatcherInterface::class));
