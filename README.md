@@ -442,7 +442,7 @@ uses attribute routing and constructor injection, so no routing YAML is needed.
 
 > **Looking for the client?** The production-grade, typed TypeScript client now
 > lives in [`js-client/`](js-client/) and is published as
-> `@resumable/chunked-uploader-client`. It is strictly dependency-free, ships
+> `chunked-uploader-client`. It is strictly dependency-free, ships
 > ESM + CJS + type declarations, and speaks the exact same wire protocol. Use it
 > in new projects; the single-file demo below is retained only so the backend can
 > be exercised with no build step.

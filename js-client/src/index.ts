@@ -1,5 +1,5 @@
 /**
- * `@resumable/chunked-uploader-client`
+ * `chunked-uploader-client`
  *
  * Typed, dependency-free browser client for the `resumable/chunked-uploader`
  * PHP backend.

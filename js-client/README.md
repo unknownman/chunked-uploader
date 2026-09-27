@@ -1,4 +1,4 @@
-# @resumable/chunked-uploader-client
+# chunked-uploader-client
 
 Typed, dependency-free resumable chunked upload client for the
 [`resumable/chunked-uploader`](https://github.com/) PHP backend.
@@ -14,13 +14,13 @@ Typed, dependency-free resumable chunked upload client for the
 ## Install
 
 ```bash
-npm install @resumable/chunked-uploader-client
+npm install chunked-uploader-client
 ```
 
 ## Quick start
 
 ```ts
-import { ChunkedUploader, type UploadResult } from '@resumable/chunked-uploader-client';
+import { ChunkedUploader, type UploadResult } from 'chunked-uploader-client';
 
 const uploader = new ChunkedUploader({
   file: fileInput.files![0]!,
