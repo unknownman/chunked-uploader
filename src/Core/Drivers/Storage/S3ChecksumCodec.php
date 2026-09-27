@@ -6,6 +6,7 @@ declare(strict_types=1);
 
 namespace Resumable\ChunkedUploader\Core\Drivers\Storage;
 
+use Resumable\ChunkedUploader\Core\Exceptions\ChecksumMismatchException;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\ChunkChecksum;
@@ -113,7 +114,7 @@ final class S3ChecksumCodec
     /**
      * Turns an S3 digest failure into a typed domain exception.
      *
-     * @throws InvalidChunkException
+     * @throws ChecksumMismatchException when the code is a digest failure
      */
     public static function throwForAwsError(string $errorCode, ?string $awsMessage = null): never
     {
@@ -128,7 +129,7 @@ final class S3ChecksumCodec
             $message .= ' S3 reported: ' . $awsMessage;
         }
 
-        throw new InvalidChunkException($message);
+        throw new ChecksumMismatchException($message, $errorCode);
     }
 
     /**

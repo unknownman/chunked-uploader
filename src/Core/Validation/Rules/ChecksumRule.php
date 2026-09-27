@@ -7,6 +7,7 @@ declare(strict_types=1);
 namespace Resumable\ChunkedUploader\Core\Validation\Rules;
 
 use Resumable\ChunkedUploader\Core\Contracts\ValidationRuleInterface;
+use Resumable\ChunkedUploader\Core\Exceptions\ChecksumMismatchException;
 use Resumable\ChunkedUploader\Core\Exceptions\InvalidChunkException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\ChunkChecksum;
@@ -55,10 +56,16 @@ final class ChecksumRule implements ValidationRuleInterface
         $actual = $this->hashFile($chunk->tmpFilePath);
 
         if (!hash_equals($expected, $actual)) {
-            throw new InvalidChunkException(sprintf(
-                'Chunk checksum does not match its contents: the client declared a %s digest but the chunk on disk hashes differently.',
-                ChunkChecksum::algorithm($chunk->checksum) ?? $this->algorithm,
-            ));
+            // Narrower than InvalidChunkException so the metrics layer can count
+            // genuine digest failures without also catching out-of-range
+            // metadata and unreadable temp files.
+            throw new ChecksumMismatchException(
+                sprintf(
+                    'Chunk checksum does not match its contents: the client declared a %s digest but the chunk on disk hashes differently.',
+                    ChunkChecksum::algorithm($chunk->checksum) ?? $this->algorithm,
+                ),
+                'local-mismatch',
+            );
         }
     }
 

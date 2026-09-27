@@ -144,9 +144,14 @@ return [
     |
     | The lock follows the "metadata" driver above and reuses its connection.
     | "ttl" bounds how long a node that dies mid-assembly can block the upload,
-    | so keep it above your slowest realistic assembly time; the lock is not
-    | renewed mid-assembly. "wait_seconds" is how long a losing request polls
-    | for the winner's final path before returning the current status.
+    | and is also the unit the heartbeat renews in: an assembly that checkpoints
+    | (see HeartbeatAwareAssemblerInterface) extends the lease every ttl/2, so
+    | the value no longer has to exceed your slowest realistic assembly time.
+    | Assemblers that cannot checkpoint -- S3MultipartAssembler's single
+    | CompleteMultipartUpload call is the built-in example -- are not renewed at
+    | all, so for those keep "ttl" above the whole operation.
+    | "wait_seconds" is how long a losing request polls for the winner's final
+    | path before returning the current status.
     |
     */
 

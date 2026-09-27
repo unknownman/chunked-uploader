@@ -51,6 +51,28 @@ return 0
 LUA;
 
     /**
+     * Compare-and-extend: only the current owner may push out its own deadline.
+     *
+     * A plain `EXPIRE` would be wrong twice over. It has no ownership check, so
+     * a node whose lease already lapsed would happily extend whatever lock now
+     * sits under that key -- extending a *competitor's* deadline, which is the
+     * split-brain this guards against. And even checked, `EXPIRE` and `GET` as
+     * two round trips leave a window in which the key can expire and be
+     * re-acquired between them, so the check would be applied to the wrong
+     * generation of the lock. Lua runs the read and the write as one
+     * indivisible step, so the token verified is necessarily the token the
+     * `PEXPIRE` then acts on.
+     *
+     * @var string
+     */
+    private const RENEW_LUA = <<<'LUA'
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+LUA;
+
+    /**
      * Identifies this holder to the datastore.
      *
      * Combines process identity with random bytes so two workers on the same
@@ -123,6 +145,41 @@ LUA;
         $this->redis->eval(self::RELEASE_LUA, 1, $redisKey, $this->token);
     }
 
+    public function renew(string $key, int $ttlSeconds = 60): bool
+    {
+        if ($ttlSeconds < 1) {
+            throw new \InvalidArgumentException('Lock TTL must be at least one second.');
+        }
+
+        if (!isset($this->held[$key])) {
+            // Not ours to extend. Renewing a key this instance never acquired
+            // would be a pure ownership violation, and the token check would
+            // reject it anyway -- failing fast makes the bug obvious.
+            return false;
+        }
+
+        $redisKey = $this->key($key);
+        $milliseconds = $ttlSeconds * 1000;
+
+        $result = $this->redis instanceof Redis
+            ? $this->redis->eval(self::RENEW_LUA, [$redisKey, $this->token, $milliseconds], 1)
+            // Predis types the variadic as string; Redis parses the integer
+            // either way, so the cast is a client-signature concession only.
+            : $this->redis->eval(self::RENEW_LUA, 1, $redisKey, $this->token, (string) $milliseconds);
+
+        // PEXPIRE returns 1 when it applied and 0 when the key was gone or
+        // already expired. A false renewal means the lease lapsed and another
+        // node may now own the key, so the local bookkeeping is dropped and the
+        // caller is told the truth instead of a stale "still held".
+        if (!$this->isAffirmative($result)) {
+            unset($this->held[$key]);
+
+            return false;
+        }
+
+        return true;
+    }
+
     /**
      * phpredis takes NX/PX as an options array and returns a bool.
      */
@@ -130,7 +187,6 @@ LUA;
     {
         return $this->redis->set($redisKey, $this->token, ['nx', 'px' => $milliseconds]) === true;
     }
-
     /**
      * Predis takes the modifiers as trailing variadic arguments and returns a
      * `Status` object on success, or null/`false` when the NX precondition fails.
@@ -156,8 +212,33 @@ LUA;
     }
 
     /**
-     * Builds a namespaced, collision-resistant key.
+     * Normalises a Lua integer reply across both supported clients.
      *
+     * phpredis returns a real int, while Predis can hand back a numeric string
+     * or bool depending on version. Every declared member of that union is
+     * handled explicitly: treating an unrecognised value as success would let a
+     * node believe it still holds a lease it has actually lost, which is the
+     * split-brain this class exists to prevent.
+     */
+    private function isAffirmative(mixed $result): bool
+    {
+        if (is_bool($result)) {
+            return $result;
+        }
+
+        if (is_int($result)) {
+            return $result === 1;
+        }
+
+        if (is_string($result)) {
+            return $result === '1' || strtoupper($result) === 'OK';
+        }
+
+        return false;
+    }
+
+    /**
+     * Builds a namespaced, collision-resistant key.     *
      * The caller's key is hashed rather than concatenated verbatim: identifiers
      * are attacker-influenced, and an unhashed key would let a crafted
      * identifier collide with, or redirect the lock onto, an unrelated key.

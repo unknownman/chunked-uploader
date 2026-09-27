@@ -105,6 +105,28 @@ class PdoLockManager implements LockManagerInterface
         $this->deleteOwnedRow($key);
     }
 
+    public function renew(string $key, int $ttlSeconds = 60): bool
+    {
+        if ($ttlSeconds < 1) {
+            throw new \InvalidArgumentException('Lock TTL must be at least one second.');
+        }
+
+        if (!isset($this->held[$key])) {
+            return false;
+        }
+
+        if (!$this->extendOwnedRow($key, time() + $ttlSeconds)) {
+            // The row is gone or belongs to someone else: the lease lapsed and a
+            // competitor may already own the key. Forget it locally so the next
+            // release() cannot act on a lock this instance no longer holds.
+            unset($this->held[$key]);
+
+            return false;
+        }
+
+        return true;
+    }
+
     /**
      * Provisions the lock table when absent.
      *
@@ -192,6 +214,44 @@ class PdoLockManager implements LockManagerInterface
             return $stmt->rowCount() > 0;
         } catch (PDOException $e) {
             throw new \RuntimeException('Unable to reclaim the expired upload lock.', 0, $e);
+        }
+    }
+
+    /**
+     * Pushes out the deadline of a row this caller still owns.
+     *
+     * The token predicate is what makes this safe. A bare
+     * `UPDATE ... SET expires_at = ? WHERE lock_key = ?` would extend whatever
+     * row currently occupies the key, so a node whose lease had lapsed would
+     * keep a *competitor's* lock alive on its way past -- the split-brain the
+     * token check prevents.
+     *
+     * Single statement on purpose. Reading the row first to confirm ownership
+     * and then updating it would open a window in which a concurrent
+     * `tryStealExpired()` could reassign the row between the two halves, so the
+     * check would pass against a row the update then overwrites. Letting the
+     * database evaluate the predicate and report the affected row count keeps
+     * read and write atomic under any isolation level, on every supported
+     * dialect.
+     *
+     * @return bool True when this caller's own row was extended
+     */
+    private function extendOwnedRow(string $key, int $expiresAt): bool
+    {
+        try {
+            $stmt = $this->pdo->prepare(
+                'UPDATE ' . $this->quoteIdent($this->tableName) . ' SET expires_at = :expires '
+                . 'WHERE lock_key = :key AND token = :token',
+            );
+            $stmt->execute([':expires' => $expiresAt, ':key' => $key, ':token' => $this->token]);
+
+            return $stmt->rowCount() > 0;
+        } catch (PDOException $e) {
+            // Renewal runs from a heartbeat, where throwing would unwind an
+            // otherwise healthy assembly. Reporting failure keeps the lease
+            // unre renewed, so the existing TTL still bounds the critical
+            // section exactly as it would without a heartbeat.
+            throw new \RuntimeException('Unable to renew the upload lock lease.', 0, $e);
         }
     }
 

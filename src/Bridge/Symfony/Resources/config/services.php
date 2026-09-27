@@ -20,8 +20,10 @@ use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Metrics\NullMetricsTracker;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
@@ -114,7 +116,15 @@ return static function (ContainerConfigurator $container): void {
     $services->set(LockManagerInterface::class)
         ->factory([service(MetadataDriverFactory::class), 'createLockManager']);
 
+    // Telemetry is an extension point, not a bundled feature. An application
+    // opts in by declaring its own service for MetricsTrackerInterface, which
+    // replaces this definition because both share one id -- so there is no
+    // package config flag to discover, and nothing to unset when swapping in a
+    // real adapter.
+    $services->set(MetricsTrackerInterface::class, NullMetricsTracker::class);
+
     $services->set(ChunkUploader::class)
+        ->arg('$metrics', service(MetricsTrackerInterface::class))
         ->arg('$maxChunkAttempts', '%chunk_uploader.rate_limiting.max_attempts%')
         ->arg('$rateLimitWindow', '%chunk_uploader.rate_limiting.decay_seconds%')
         ->arg('$rateLimitKey', '%chunk_uploader.rate_limiting.key%')

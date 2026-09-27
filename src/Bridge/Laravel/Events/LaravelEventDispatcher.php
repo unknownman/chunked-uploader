@@ -23,11 +23,24 @@ final readonly class LaravelEventDispatcher implements EventDispatcherInterface
     ) {
     }
 
+    /**
+     * @template T of object
+     *
+     * @param T $event
+     *
+     * @return T
+     *
+     * The template is repeated from {@see EventDispatcherInterface} so callers
+     * get their own event type back instead of a bare `object`. Laravel's
+     * Dispatcher is not generic in every supported version, hence the local
+     * assertion; the runtime contract is "the event you passed in, after
+     * propagation", so this reattaches nothing that was not already true.
+     */
     public function dispatch(object $event): object
     {
-        /** @var object $result */
-        $result = $this->dispatcher->dispatch($event);
+        $dispatched = $this->dispatcher->dispatch($event);
 
-        return $result;
+        /** @var T $dispatched */
+        return $dispatched;
     }
 }

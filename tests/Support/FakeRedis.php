@@ -144,6 +144,10 @@ final class FakeRedis extends Redis
             return $this->applyReleaseLock($args);
         }
 
+        if (str_contains($script, 'redis.call(\'PEXPIRE\'')) {
+            return $this->applyRenewLock($script, $args);
+        }
+
         $key = $args[0] ?? null;
 
         if (!is_string($key) || $this->get($key) === false) {
@@ -197,6 +201,83 @@ final class FakeRedis extends Redis
      *
      * @return array<string, mixed>
      */
+    /**
+     * Compare-and-extend, matching the real renew script: the deadline moves only
+     * when the stored token is still the caller's.
+     *
+     * A fake that extended unconditionally would let the renewal tests pass while
+     * the production Lua did the right thing, which is exactly the class of bug
+     * worth guarding -- so the ownership check is modelled faithfully.
+     *
+     * @param list<mixed> $args
+     */
+    private function applyRenewLock(string $script, array $args): int
+    {
+        $key = $args[0] ?? null;
+        $token = $args[1] ?? null;
+        $milliseconds = $args[2] ?? null;
+
+        if (!is_string($key) || !is_string($token) || $this->get($key) === false) {
+            return 0;
+        }
+
+        // The ownership guard is taken from the script under test rather than
+        // imposed by the fake. A fake that always compared tokens would make the
+        // renewal tests pass even if the production Lua stopped comparing them,
+        // which is precisely the regression these tests exist to catch: the whole
+        // safety argument rests on that `GET == ARGV[1]` line.
+        $guarded = str_contains($script, "redis.call('GET', KEYS[1]) == ARGV[1]");
+
+        if ($guarded && $this->data[$key] !== $token) {
+            return 0;
+        }
+
+        $this->deadlines[$key] = time() + (int) ceil(((int) $milliseconds) / 1000);
+
+        return 1;
+    }
+
+    /**
+     * Removes a key immediately, simulating a lease that has lapsed.
+     */
+    public function expireNow(string $key): void
+    {
+        $this->forget($key);
+    }
+
+    /**
+     * Replaces the value of an existing key, simulating a competing node that took
+     * the lock over once the previous lease expired.
+     */
+    public function stealByAnotherNode(string $key, string $token, int $ttlSeconds = 60): void
+    {
+        $this->data[$key] = $token;
+        $this->deadlines[$key] = time() + $ttlSeconds;
+    }
+
+    /**
+     * The only key currently stored, or null when the store is empty.
+     *
+     * {@see RedisLockManager} hashes its keys, so a test cannot derive one from a
+     * readable name. Returning the single stored key keeps the lock tests
+     * independent of the prefix and the hash function, neither of which is what
+     * they are testing.
+     */
+    public function onlyKey(): ?string
+    {
+        $keys = array_keys($this->data);
+
+        return $keys === [] ? null : (string) $keys[0];
+    }
+
+    /**
+     * The lease deadline recorded for a key, or null when it is not locked.
+     */
+    public function deadlineFor(string $key): ?int
+    {
+        return $this->deadlines[$key] ?? null;
+    }
+
     private function normalizeSetOptions(mixed $options): array
     {
         if (!is_array($options)) {

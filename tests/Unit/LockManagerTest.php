@@ -55,6 +55,135 @@ final class LockManagerTest extends TestCase
         self::assertTrue($this->pdoLocks()->acquire('k', 30));
     }
 
+    public function test_renew_extends_the_lease_for_pdo(): void
+    {
+        $locks = $this->pdoLocks();
+        self::assertTrue($locks->acquire('k', 30));
+
+        $before = $this->expiryOf('k');
+        self::assertTrue($locks->renew('k', 120));
+        self::assertGreaterThan($before, $this->expiryOf('k'), 'Renewal must push the deadline out.');
+    }
+
+    public function test_renew_extends_the_lease_for_redis(): void
+    {
+        $redis = new FakeRedis();
+        $locks = new RedisLockManager($redis);
+        self::assertTrue($locks->acquire('k', 5));
+
+        $before = (int) $redis->deadlineFor((string) $redis->onlyKey());
+        self::assertTrue($locks->renew('k', 600));
+
+        self::assertGreaterThan(
+            $before,
+            (int) $redis->deadlineFor((string) $redis->onlyKey()),
+            'PEXPIRE must move the key deadline rather than re-asserting the old one.',
+        );
+    }
+
+    public function test_renew_refuses_a_key_another_node_now_owns(): void
+    {
+        $locks = $this->pdoLocks();
+        self::assertTrue($locks->acquire('k', 30));
+
+        // The lease lapsed and a competitor took the key over. The lapsed holder
+        // must not be able to extend a lock it no longer owns.
+        $this->expireAndSteal('k');
+
+        self::assertFalse($locks->renew('k', 600), 'Renewal must be owner-verified.');
+    }
+
+    public function test_renew_refuses_after_the_lease_expired(): void
+    {
+        $locks = $this->pdoLocks();
+        self::assertTrue($locks->acquire('k', 30));
+
+        $this->expireAndSteal('k');
+
+        self::assertFalse($locks->renew('k', 600));
+    }
+
+    public function test_renew_refuses_a_lock_never_acquired(): void
+    {
+        self::assertFalse($this->pdoLocks()->renew('never-acquired', 60));
+        self::assertFalse($this->redisLocks()->renew('never-acquired', 60));
+    }
+
+    public function test_a_renewed_lease_still_excludes_other_nodes(): void
+    {
+        $locks = $this->pdoLocks();
+        self::assertTrue($locks->acquire('k', 30));
+        self::assertTrue($locks->renew('k', 300));
+
+        self::assertFalse($this->pdoLocks()->acquire('k', 30), 'Renewal must not make the lock available.');
+    }
+
+    public function test_a_lapsed_holder_cannot_release_its_successors_lock(): void
+    {
+        $first = $this->pdoLocks();
+        self::assertTrue($first->acquire('k', 30));
+
+        // Lapse, then a second node takes the key.
+        $this->expireAndSteal('k');
+
+        $first->release('k');
+
+        self::assertNotNull(
+            $this->expiryOf('k'),
+            'The original holder deleting the key would hand a third node a lock nobody holds.',
+        );
+    }
+
+    public function test_renew_rejects_a_non_positive_ttl(): void
+    {
+        $locks = $this->pdoLocks();
+        $locks->acquire('k', 30);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $locks->renew('k', 0);
+    }
+
+    public function test_redis_renew_refuses_a_key_another_node_now_owns(): void
+    {
+        $redis = new FakeRedis();
+        $locks = new RedisLockManager($redis);
+        self::assertTrue($locks->acquire('k', 30));
+
+        $redis->stealByAnotherNode((string) $redis->onlyKey(), 'someone-else', 60);
+
+        self::assertFalse($locks->renew('k', 600), 'The Lua compare must reject a foreign token.');
+    }
+
+    public function test_redis_renew_refuses_an_expired_key(): void
+    {
+        $redis = new FakeRedis();
+        $locks = new RedisLockManager($redis);
+        self::assertTrue($locks->acquire('k', 30));
+
+        $redis->expireNow((string) $redis->onlyKey());
+
+        self::assertFalse($locks->renew('k', 600), 'PEXPIRE on a missing key must report failure.');
+    }
+
+    private function expiryOf(string $key): int
+    {
+        $stmt = $this->pdo->query("SELECT expires_at FROM chunked_uploader_locks WHERE lock_key = '" . $key . "'");
+        $value = $stmt === false ? false : $stmt->fetchColumn();
+
+        self::assertNotFalse($value, 'Expected a lock row for ' . $key);
+
+        return (int) $value;
+    }
+
+    /**
+     * Simulates a lease that lapsed and was then taken over by another node.
+     */
+    private function expireAndSteal(string $key): void
+    {
+        $this->pdo->exec("UPDATE chunked_uploader_locks SET expires_at = 1, token = 'competitor' WHERE lock_key = '"
+            . $key . "'");
+    }
+
     public function test_redis_refuses_a_second_node_while_held(): void
     {
         $redis = new FakeRedis();

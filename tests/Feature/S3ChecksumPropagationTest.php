@@ -23,7 +23,7 @@ use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\NullEventDispatcher;
 use Resumable\ChunkedUploader\Tests\TestCase;
-use Resumable\ChunkedUploader\Tests\Unit\FakeS3Client;
+use Resumable\ChunkedUploader\Tests\Support\FakeS3Client;
 
 /**
  * Proves a digest rejection reaches the caller as {@see InvalidChunkException}.

@@ -6,11 +6,6 @@ parameters:
 			path: src/Bridge/Laravel/Commands/CleanupOrphanedChunksCommand.php
 
 		-
-			message: "#^Method Resumable\\\\ChunkedUploader\\\\Bridge\\\\Laravel\\\\Events\\\\LaravelEventDispatcher\\:\\:dispatch\\(\\) should return T of object but returns object\\.$#"
-			count: 1
-			path: src/Bridge/Laravel/Events/LaravelEventDispatcher.php
-
-		-
 			message: "#^Cannot cast mixed to int\\.$#"
 			count: 12
 			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php

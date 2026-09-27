@@ -14,6 +14,7 @@ use Resumable\ChunkedUploader\Core\Exceptions\MissingChunkException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Tests\TestCase;
+use Resumable\ChunkedUploader\Tests\Support\FakeS3Client;
 
 final class S3MultipartAssemblerTest extends TestCase
 {

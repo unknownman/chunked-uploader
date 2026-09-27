@@ -22,12 +22,14 @@ use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Drivers\Locking\PdoLockManager;
 use Resumable\ChunkedUploader\Core\Drivers\Locking\RedisLockManager;
+use Resumable\ChunkedUploader\Core\Drivers\Metrics\NullMetricsTracker;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
@@ -155,6 +157,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         $this->app->singleton(EventDispatcherInterface::class, LaravelEventDispatcher::class);
         $this->registerVirusScanner();
         $this->registerRateLimiter();
+        $this->registerMetrics();
 
         $this->app->singleton(ChunkUploader::class, static function ($app): ChunkUploader {
             /** @var ConfigRepository $config */
@@ -182,6 +185,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 lockManager: $app->make(LockManagerInterface::class),
                 assemblyLockTtl: (int) $config->get('chunk-uploader.assembly_lock.ttl', 60),
                 assemblyWaitSeconds: (int) $config->get('chunk-uploader.assembly_lock.wait_seconds', 10),
+                metrics: $app->make(MetricsTrackerInterface::class),
             );
         });
 
@@ -310,6 +314,21 @@ class ChunkUploaderServiceProvider extends ServiceProvider
 
             return $repository;
         });
+    }
+
+    /**
+     * Binds the no-op tracker unless the application already declared one.
+     *
+     * The `bound` check is what makes telemetry an opt-in extension point rather
+     * than a hardcoded null: a service provider loaded after this one can bind
+     * its own Prometheus or StatsD adapter to the same interface and have the
+     * uploader pick it up, with no configuration flag in this package.
+     */
+    private function registerMetrics(): void
+    {
+        if (!$this->app->bound(MetricsTrackerInterface::class)) {
+            $this->app->singleton(MetricsTrackerInterface::class, NullMetricsTracker::class);
+        }
     }
 
     /**

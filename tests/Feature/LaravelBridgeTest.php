@@ -154,6 +154,49 @@ final class LaravelBridgeTest extends TestCase
     }
 
     #[Test]
+    public function test_provider_defaults_telemetry_to_a_silent_tracker(): void
+    {
+        $source = file_get_contents(__DIR__ . '/../../src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php');
+        self::assertIsString($source);
+
+        self::assertStringContainsString('$this->registerMetrics();', $source);
+        self::assertStringContainsString('NullMetricsTracker::class', $source);
+        self::assertStringContainsString('metrics: $app->make(MetricsTrackerInterface::class)', $source);
+    }
+
+    #[Test]
+    public function test_an_application_tracker_bound_before_the_provider_wins(): void
+    {
+        $app = $this->appWithConfig();
+        $mine = new \Resumable\ChunkedUploader\Tests\Support\RecordingMetricsTracker();
+
+        // Bound first, the way a package that owns telemetry would.
+        $app->singleton(\Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface::class, static fn () => $mine);
+
+        $provider = new \Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider($app);
+        $provider->register();
+
+        self::assertSame(
+            $mine,
+            $app->make(\Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface::class),
+            'The package must not overwrite a tracker the application already bound.',
+        );
+    }
+
+    #[Test]
+    public function test_a_silent_tracker_is_bound_when_the_application_has_not_chosen_one(): void
+    {
+        $app = $this->appWithConfig();
+        $provider = new \Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider($app);
+        $provider->register();
+
+        self::assertInstanceOf(
+            \Resumable\ChunkedUploader\Core\Drivers\Metrics\NullMetricsTracker::class,
+            $app->make(\Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface::class),
+        );
+    }
+
+    #[Test]
     public function test_cleanup_command_runs_the_collector_and_reports_success(): void
     {
         $collector = new GarbageCollector(new InMemoryChunkStorage(), new InMemoryMetadataRepository());
@@ -238,5 +281,74 @@ final class LaravelBridgeTest extends TestCase
         );
         $storage->store($chunk);
         $storage->ageChunks('orphan upload', 7200);
+    }
+
+    /**
+     * A bare container with just enough of a config repository for the provider's
+     * register() pass to run.
+     */
+    private function appWithConfig(): \Illuminate\Container\Container
+    {
+        // Reports itself as having cached configuration, which makes
+        // ServiceProvider::mergeConfigFrom() a no-op. That is deliberate: the
+        // package config file calls env(), and env() is only functional inside a
+        // full Laravel install because the library it needs ships with the
+        // framework rather than with illuminate/support. These tests are about
+        // which services get bound, not about parsing that config file, so the
+        // merge is skipped rather than dragging in a framework-only dependency.
+        $app = new class () extends \Illuminate\Container\Container implements \Illuminate\Contracts\Foundation\CachesConfiguration {
+            public function configurationIsCached(): bool
+            {
+                return true;
+            }
+
+            public function getCachedConfigPath(): string
+            {
+                return $this->tempDirForTests() . '/config.php';
+            }
+
+            public function getCachedServicesPath(): string
+            {
+                return $this->tempDirForTests() . '/services.php';
+            }
+
+            private function tempDirForTests(): string
+            {
+                return sys_get_temp_dir() . '/chunked-uploader-laravel-bridge';
+            }
+        };
+
+        // A stand-in for Illuminate\Config\Repository, which is not a dev
+        // dependency here. The provider only ever calls get(), and its own type
+        // declaration for the repository is a docblock, so this is enough to let
+        // register() complete.
+        // The provider reads configuration through the global app() helper, not
+        // through an injected container, so this instance has to be the global
+        // one for register() to see the repository.
+        \Illuminate\Container\Container::setInstance($app);
+
+        $app->instance('config', new class () {
+            /** @var array<string, mixed> */
+            private array $values = [
+                'chunk-uploader.assembly_lock.ttl' => 60,
+                'chunk-uploader.assembly_lock.wait_seconds' => 10,
+            ];
+
+            public function get(string $key, mixed $default = null): mixed
+            {
+                return $this->values[$key] ?? $default;
+            }
+
+            /**
+             * ServiceProvider::register() republishes package config on boot.
+             *
+             * @param array<string, mixed> $config
+             */
+            public function set(array $config): void
+            {
+            }
+        });
+
+        return $app;
     }
 }

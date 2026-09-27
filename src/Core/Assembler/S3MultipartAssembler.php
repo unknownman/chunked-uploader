@@ -32,6 +32,25 @@ use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
  */
 final class S3MultipartAssembler implements FileAssemblerInterface
 {
+    /*
+     * Deliberately NOT HeartbeatAwareAssemblerInterface.
+     *
+     * The natural reading of "assembly lock expires during S3 assembly" is a
+     * multi-gigabyte transfer that outruns the TTL. That cannot happen here.
+     * S3 multipart splits a file across UploadPart calls, which happen when the
+     * *chunks* arrive, outside the assembly lock. By the time this assembler
+     * runs, every byte is already in S3; CompleteMultipartUpload only merges a
+     * part manifest, and its duration scales with the number of parts (capped at
+     * 10,000) rather than with file size. The critical section is a metadata
+     * commit measured in milliseconds.
+     *
+     * Implementing the capability here would mean ticking once before or after
+     * the request, which renews nothing: a tick cannot run while the SDK is
+     * blocked. It would only make the lease look managed on paper while a slow
+     * request could still outlive the TTL. So the class declines the capability,
+     * and ChunkUploader's post-assembly ownership check covers the remaining
+     * risk. Size assemblyLockTtl above your worst-case completion latency.
+     */
     private S3ObjectKeyResolver $keys;
 
     /**

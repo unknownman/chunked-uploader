@@ -6,6 +6,8 @@ namespace Resumable\ChunkedUploader\Core\Assembler;
 
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\HeartbeatAwareAssemblerInterface;
+use Resumable\ChunkedUploader\Core\Locking\AssemblyHeartbeat;
 use Resumable\ChunkedUploader\Core\Exceptions\AssemblyException;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
 use Resumable\ChunkedUploader\Core\Exceptions\MissingChunkException;
@@ -13,13 +15,36 @@ use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
 
-final class StreamAssembler implements FileAssemblerInterface
+/**
+ * Assembles a local upload by streaming every chunk into the final file.
+ *
+ * Because the copy is a PHP-level loop, this is the one built-in assembler that
+ * can genuinely renew its assembly lock: each chunk boundary is a point where
+ * control returns to PHP, so {@see AssemblyHeartbeat::tick()} can run and extend
+ * the lease while a multi-gigabyte file is being written. A single remote call
+ * has no such opportunity.
+ */
+final class StreamAssembler implements HeartbeatAwareAssemblerInterface
 {
     private const BUFFER = 4194304; // 4MB
+
+    /**
+     * Guarding the in-flight critical section, or null outside one.
+     *
+     * Mutable because the assembler is a long-lived service shared by every
+     * upload in the container, and the capability is attached per critical
+     * section rather than per instance.
+     */
+    private ?AssemblyHeartbeat $heartbeat = null;
 
     public function __construct(private readonly string $finalBaseDir)
     {
         $this->ensureDirectory($this->finalBaseDir);
+    }
+
+    public function setHeartbeat(?AssemblyHeartbeat $heartbeat): void
+    {
+        $this->heartbeat = $heartbeat;
     }
 
     public function assemble(UploadState $state, ChunkStorageInterface $storage): string
@@ -63,6 +88,12 @@ final class StreamAssembler implements FileAssemblerInterface
                         fclose($in);
                     }
                 }
+
+                // Chunk boundary: the copy is complete and control is back in
+                // PHP, so the lease can be extended. Ticking after the chunk
+                // rather than before keeps the window aligned with real work
+                // done, and the tick is a no-op until ttl/2 has elapsed.
+                $this->heartbeat?->tick();
             }
 
             fflush($out);

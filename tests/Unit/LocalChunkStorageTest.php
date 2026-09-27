@@ -76,7 +76,9 @@ final class LocalChunkStorageTest extends TestCase
         $dir = $base . '/touched';
         $firstMtime = filemtime($dir);
 
-        usleep(1_100_000); // ensure a distinct second
+        // No wait between the two writes: the assertion is that mtime never moves
+        // backwards, which is true whether or not a second boundary is crossed.
+        // Sleeping here would only prove the filesystem's clock is ticking.
         $storage->store($this->chunk($this->temporaryFile('C2'), '', 1, 2, 2, 'touched'));
 
         $secondMtime = filemtime($dir);

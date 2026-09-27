@@ -12,6 +12,8 @@ use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\ChunkUploaderEx
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\Configuration;
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\MetadataDriverFactory;
 use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Metrics\NullMetricsTracker;
 use Resumable\ChunkedUploader\Core\Drivers\Locking\PdoLockManager;
 use Resumable\ChunkedUploader\Core\Drivers\Locking\RedisLockManager;
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\AssemblerDriverFactory;
@@ -255,6 +257,67 @@ final class SymfonyBridgeTest extends TestCase
                 ->getArgument('$lockManager') instanceof \Symfony\Component\DependencyInjection\Reference,
             'The uploader must receive the lock manager, not a null default.',
         );
+    }
+
+    #[Test]
+    public function test_telemetry_defaults_to_a_silent_tracker_and_is_overridable(): void
+    {
+        $container = new ContainerBuilder();
+        (new ChunkUploaderExtension())->load([[]], $container);
+
+        self::assertTrue($container->hasDefinition(MetricsTrackerInterface::class));
+        self::assertSame(
+            NullMetricsTracker::class,
+            $container->getDefinition(MetricsTrackerInterface::class)->getClass(),
+            'A deployment that wants no telemetry must not have to configure its way out of it.',
+        );
+        self::assertInstanceOf(
+            \Symfony\Component\DependencyInjection\Reference::class,
+            $container->getDefinition(\Resumable\ChunkedUploader\Core\ChunkUploader::class)
+                ->getArgument('$metrics'),
+            'The uploader must resolve the tracker from the container so a binding can replace it.',
+        );
+    }
+
+    #[Test]
+    public function test_an_application_tracker_replaces_the_silent_default(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.project_dir', $this->tempDir());
+        $container->setParameter('kernel.cache_dir', $this->tempDir() . '/cache');
+        (new ChunkUploaderExtension())->load([[]], $container);
+
+        $mine = new class () implements MetricsTrackerInterface {
+            public function incrementChunkUploaded(int $bytes): void
+            {
+            }
+
+            public function incrementChecksumMismatch(string $driver, string $reason): void
+            {
+            }
+
+            public function incrementLockCollision(string $key): void
+            {
+            }
+
+            public function incrementLockLeaseExpired(string $key): void
+            {
+            }
+
+            public function recordAssemblyTime(string $identifier, float $durationSeconds, string $driver): void
+            {
+            }
+        };
+
+        // Declaring the same id is the whole override story: no config flag in
+        // this package to discover, and nothing to unset.
+        $container->setDefinition(
+            MetricsTrackerInterface::class,
+            (new \Symfony\Component\DependencyInjection\Definition($mine::class))->setPublic(true),
+        );
+        $container->compile();
+
+        self::assertInstanceOf($mine::class, $container->get(MetricsTrackerInterface::class));
     }
 
     #[Test]

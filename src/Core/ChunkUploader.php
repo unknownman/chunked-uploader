@@ -11,16 +11,22 @@ use Resumable\ChunkedUploader\Core\Contracts\ChunkUploaderInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\HeartbeatAwareAssemblerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetricsTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Metrics\NullMetricsTracker;
 use Resumable\ChunkedUploader\Core\Events\ChunkUploadedEvent;
 use Resumable\ChunkedUploader\Core\Events\FileAssembledEvent;
 use Resumable\ChunkedUploader\Core\Events\UploadFailedEvent;
+use Resumable\ChunkedUploader\Core\Exceptions\AssemblyLeaseLostException;
+use Resumable\ChunkedUploader\Core\Exceptions\ChecksumMismatchException;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkUploaderException;
 use Resumable\ChunkedUploader\Core\Exceptions\RateLimitExceededException;
 use Resumable\ChunkedUploader\Core\Exceptions\UploadFailedException;
+use Resumable\ChunkedUploader\Core\Locking\AssemblyHeartbeat;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Throwable;
@@ -54,6 +60,8 @@ final class ChunkUploader implements ChunkUploaderInterface
         private readonly int $assemblyLockTtl = 60,
         private readonly int $assemblyWaitSeconds = 10,
         private readonly int $assemblyPollMicroseconds = 100_000,
+        private readonly MetricsTrackerInterface $metrics = new NullMetricsTracker(),
+        private readonly ?\Closure $clock = null,
     ) {
     }
 
@@ -68,6 +76,19 @@ final class ChunkUploader implements ChunkUploaderInterface
             } else {
                 $this->validator->validate($chunk);
             }
+        } catch (ChecksumMismatchException $e) {
+            // Caught separately from the generic validation failure: a digest
+            // mismatch is a data-integrity event that clusters by cause, while
+            // an out-of-range index is a client bug. Merged into one counter
+            // they would be indistinguishable.
+            $this->recordChecksumMismatch($e);
+            $this->logger?->warning('Chunk checksum rejected', [
+                'identifier' => $chunk->identifier,
+                'index' => $chunk->index,
+                'error' => $e->getMessage(),
+            ]);
+            $this->dispatchFailure($this->currentState($chunk->identifier), $e);
+            throw $e;
         } catch (Throwable $e) {
             $this->logger?->warning('Chunk validation failed', ['identifier' => $chunk->identifier, 'index' => $chunk->index, 'error' => $e->getMessage()]);
             $this->dispatchFailure($this->currentState($chunk->identifier), $e);
@@ -93,11 +114,15 @@ final class ChunkUploader implements ChunkUploaderInterface
 
         try {
             $this->storage->store($chunk);
+        } catch (ChecksumMismatchException $e) {
+            $this->recordChecksumMismatch($e);
+            $this->dispatchFailure($state, $e);
+            throw $e;
         } catch (ChunkUploaderException $e) {
-            // A driver that already classified the failure -- a corrupt part
-            // rejected by S3's digest check, say -- keeps its own type. Flattening
-            // it into UploadFailedException would tell a client to retry a
-            // malformed request forever, when retrying identical bytes cannot help.
+            // A driver that already classified the failure keeps its own type.
+            // Flattening it into UploadFailedException would tell a client to
+            // retry a malformed request forever, when retrying identical bytes
+            // cannot help.
             $this->dispatchFailure($state, $e);
             throw $e;
         } catch (Throwable $e) {
@@ -115,6 +140,18 @@ final class ChunkUploader implements ChunkUploaderInterface
             }
             $this->dispatchFailure($state, $e);
             throw new UploadFailedException('Failed to record uploaded chunk: ' . $e->getMessage(), 0, $e);
+        }
+
+        // After the metadata write, not after the storage write: a chunk whose
+        // progress record failed is rolled back and deleted, so counting it would
+        // report bytes that no longer exist.
+        //
+        // A non-positive size is skipped rather than recorded as zero. Callers
+        // legitimately build chunks without a known length, and a zero-byte
+        // observation is indistinguishable from a genuinely empty chunk, which
+        // would quietly drag down any throughput average built from this.
+        if ($chunk->chunkSize > 0) {
+            $this->metrics->incrementChunkUploaded($chunk->chunkSize);
         }
 
         $this->dispatcher->dispatch(new ChunkUploadedEvent($state, $chunk));
@@ -164,18 +201,26 @@ final class ChunkUploader implements ChunkUploaderInterface
             }
 
             if ($this->lockManager->acquire($lockKey, $this->assemblyLockTtl)) {
-                try {
-                    return $this->assembleIfNeeded($state, $chunk);
-                } finally {
-                    $this->releaseLock($lockKey);
-                }
+                return $this->runCriticalSection($state, $chunk, $lockKey, $this->lockManager);
             }
 
             $this->logger?->info('Assembly already in progress for this upload; waiting for the owning node', [
                 'identifier' => $chunk->identifier,
             ]);
 
+            // A real collision: another node is inside the critical section for
+            // this identifier. Worth counting, because a rising rate points at a
+            // TTL too short for the assembler or a hot upload being retried.
+            $this->metrics->incrementLockCollision($chunk->identifier);
+
             return $this->awaitAssembly($state, $chunk, $lockKey, $this->lockManager);
+        } catch (AssemblyLeaseLostException $e) {
+            // Already a classified, actionable condition, so it is re-raised
+            // rather than wrapped. Flattening it into UploadFailedException would
+            // tell the client its upload failed and invite a retry of data that is
+            // intact and that another node is finalizing right now -- the exact
+            // advice that turns a benign race into a retry storm.
+            throw $e;
         } catch (Throwable $e) {
             $this->dispatchFailure($state, $e);
             throw new UploadFailedException('Assembly failed: ' . $e->getMessage(), 0, $e);
@@ -191,8 +236,13 @@ final class ChunkUploader implements ChunkUploaderInterface
      * already finalized. Re-reading after acquisition is what makes the
      * check-then-act sequence atomic with respect to every other node.
      */
-    private function assembleIfNeeded(UploadState $state, Chunk $chunk): UploadState
-    {
+    private function assembleIfNeeded(
+        UploadState $state,
+        Chunk $chunk,
+        ?AssemblyHeartbeat $heartbeat = null,
+        ?LockManagerInterface $lockManager = null,
+        ?string $lockKey = null,
+    ): UploadState {
         $current = $this->metadata->get($chunk->identifier);
         if ($current !== null) {
             if ($current->finalPath !== null || !$this->progress->isComplete($current)) {
@@ -201,13 +251,172 @@ final class ChunkUploader implements ChunkUploaderInterface
             $state = $current;
         }
 
+        $startedAt = microtime(true);
         $finalPath = $this->assembler->assemble($state, $this->storage);
+        $duration = microtime(true) - $startedAt;
+
+        $this->metrics->recordAssemblyTime($chunk->identifier, $duration, $this->storageDriverName());
+
+        // Last gate before anything destructive. `assemble()` has already written
+        // the destination file, but deleting chunks and publishing finalPath are
+        // the irreversible steps, and both are unsafe if a competitor is inside
+        // the critical section right now. This is the defence that holds even
+        // when the lock is not.
+        $this->assertLeaseStillHeld($state, $heartbeat, $lockManager, $lockKey);
+
         $this->storage->deleteChunks($chunk->identifier);
         $finalized = $state->withFinalPath($finalPath);
         $this->metadata->save($finalized);
         $this->dispatcher->dispatch(new FileAssembledEvent($finalized, $finalPath));
 
         return $finalized;
+    }
+
+    /**
+     * Refuses to finalize if the assembly lock is not demonstrably still ours.
+     *
+     * The heartbeat only catches loss that happened *while* it was ticking, and
+     * an assembler with no checkpoint cannot tick at all. This is the belt to
+     * that braces: after the fact, `renew()` doubles as a token-checked ownership
+     * assertion, because it succeeds only while the stored token is still this
+     * node's.
+     *
+     * A false result alone is not proof of a competitor, because the lease can
+     * also have expired with nobody showing up -- benign, and abandoning a
+     * completed assembly over it would be a self-inflicted failure. The two are
+     * told apart by re-acquiring: `acquire()` only succeeds when nobody holds the
+     * key, so a success proves the lock was merely lapsed and is re-owned, while
+     * a failure proves a live competitor.
+     *
+     * A lease the heartbeat *did* observe being lost is never benign. Mutual
+     * exclusion demonstrably failed, and a competitor may have assembled and
+     * published already, so this node must not add a second, conflicting result.
+     *
+     * @throws AssemblyLeaseLostException
+     */
+    private function assertLeaseStillHeld(
+        UploadState $state,
+        ?AssemblyHeartbeat $heartbeat,
+        ?LockManagerInterface $lockManager,
+        ?string $lockKey,
+    ): void {
+        if ($heartbeat?->lost() === true) {
+            throw new AssemblyLeaseLostException(
+                'Lost the assembly lock while assembling; another node may be finalizing this upload',
+                $state,
+            );
+        }
+
+        if ($lockManager === null || $lockKey === null) {
+            return;
+        }
+
+        if ($lockManager->renew($lockKey, $this->assemblyLockTtl)) {
+            return;
+        }
+
+        if ($lockManager->acquire($lockKey, $this->assemblyLockTtl)) {
+            // Expired without a competitor; we hold it again. Nothing to report.
+            return;
+        }
+
+        $this->logger?->error('Assembly lock was taken by another node mid-assembly; discarding result', [
+            'identifier' => $state->identifier,
+            'lockKey' => $lockKey,
+        ]);
+
+        // Recorded here as well as in the heartbeat, because an assembler with no
+        // checkpoint can only be caught after the fact. Without this, the
+        // opaque-assembler path would detect the failure correctly and then
+        // report nothing, leaving the most serious variant of this condition as
+        // the one that never pages.
+        $this->metrics->incrementLockLeaseExpired($lockKey);
+
+        throw new AssemblyLeaseLostException(
+            'Assembly lock is held by another node; refusing to finalize',
+            $state,
+        );
+    }
+
+    /**
+     * Runs the locked critical section with a lease heartbeat attached.
+     *
+     * The heartbeat is created here and torn down in the same `finally` that
+     * releases the lock, so the two can never get out of step: a renewal
+     * scheduled after the release could resurrect a lease this node believes it
+     * has given up, keeping every other node out of a lock nobody holds.
+     *
+     * The heartbeat is only attached to assemblers that implement
+     * {@see HeartbeatAwareAssemblerInterface}, i.e. that can offer a point where
+     * control is back in PHP. Passing it to an opaque single-shot assembler would
+     * create the appearance of a lease guard that provably cannot run.
+     */
+    private function runCriticalSection(
+        UploadState $state,
+        Chunk $chunk,
+        string $lockKey,
+        LockManagerInterface $lockManager,
+    ): UploadState {
+        $heartbeat = new AssemblyHeartbeat(
+            $lockManager,
+            $lockKey,
+            $this->assemblyLockTtl,
+            $this->metrics,
+            $this->clock,
+        );
+        $attaches = $this->assembler instanceof HeartbeatAwareAssemblerInterface ? $this->assembler : null;
+
+        if ($attaches !== null) {
+            $attaches->setHeartbeat($heartbeat);
+        }
+
+        try {
+            return $this->assembleIfNeeded(
+                $state,
+                $chunk,
+                $attaches !== null ? $heartbeat : null,
+                $lockManager,
+                $lockKey,
+            );
+        } finally {
+            // Detach before releasing so a retained assembler cannot renew a
+            // lease that is about to be dropped, then stop and release. Order
+            // matters: stop() is what makes a late tick a no-op.
+            if ($attaches !== null) {
+                $attaches->setHeartbeat(null);
+            }
+            $heartbeat->stop();
+            $this->releaseLock($lockKey);
+        }
+    }
+
+    /**
+     * Records a digest failure, falling back to a bounded reason code.
+     *
+     * The label is derived from the backend's own error code, with a fixed
+     * fallback rather than the exception message: messages embed part numbers,
+     * filenames and AWS prose, so using them as labels would explode metric
+     * cardinality and make the series useless.
+     */
+    private function recordChecksumMismatch(ChecksumMismatchException $e): void
+    {
+        $this->metrics->incrementChecksumMismatch(
+            $this->storageDriverName(),
+            $e->reasonCode() ?? 'unknown-mismatch',
+        );
+    }
+
+    /**
+     * Best-effort driver name for metrics labels.
+     *
+     * Derived from the storage class rather than injected as a second source of
+     * truth, so the label cannot drift away from the driver actually used.
+     */
+    private function storageDriverName(): string
+    {
+        return str_contains($this->storage::class, 'S3')
+            ? 's3'
+            : 'local';
     }
 
     /**
@@ -240,12 +449,10 @@ final class ChunkUploader implements ChunkUploaderInterface
             // Retry acquisition: the holder may have finished, or crashed and
             // let its lease lapse, in which case this node finishes the job.
             if ($lockManager->acquire($lockKey, $this->assemblyLockTtl)) {
-                try {
-                    return $this->assembleIfNeeded($state, $chunk);
-                } finally {
-                    $this->releaseLock($lockKey);
-                }
+                return $this->runCriticalSection($state, $chunk, $lockKey, $lockManager);
             }
+
+            $this->metrics->incrementLockCollision($chunk->identifier);
         }
 
         $this->logger?->info('Gave up waiting for concurrent assembly; returning current upload status', [
