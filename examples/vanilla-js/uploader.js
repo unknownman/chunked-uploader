@@ -1,6 +1,18 @@
 'use strict';
 
 /**
+ * @deprecated Single-file demo client, kept so the backend can be exercised
+ * without Node.js or a build step. The production-grade, typed successor is
+ * the npm package in `js-client/`:
+ *
+ *   npm install @resumable/chunked-uploader-client
+ *
+ * It adds custom auth headers / `beforeRequest` hooks, AbortSignal support,
+ * a typed error taxonomy, a retry classifier and pause/resume that shares the
+ * in-flight promise. The wire protocol is identical.
+ */
+
+/**
  * ChunkedUploader
  *
  * Dependency-free resumable upload client. Splits a File into binary chunks

@@ -63,8 +63,7 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
     {
         try {
             $stmt = $this->pdo->prepare(
-                'SELECT identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path '
-                . 'FROM ' . $this->quoteIdent($this->tableName) . ' WHERE identifier = :id',
+                'SELECT ' . $this->selectColumns() . ' FROM ' . $this->quoteIdent($this->tableName) . ' WHERE identifier = :id',
             );
             $stmt->execute([':id' => $identifier]);
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -134,6 +133,36 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
         }
     }
 
+    public function recordPartEtag(string $identifier, int $partNumber, string $etag): UploadState
+    {
+        if ($partNumber < 1) {
+            throw new MetadataException('Part number must be 1 or greater.');
+        }
+
+        $this->begin();
+        try {
+            $row = $this->lockForUpdate($identifier);
+            if ($row === null) {
+                $this->abort();
+                throw new MetadataException(
+                    sprintf('Cannot record ETag for part %d: upload "%s" not found.', $partNumber, $identifier),
+                );
+            }
+
+            $state = $this->hydrate($row)->withPartEtag($partNumber, $etag);
+
+            $this->upsert($state);
+            $this->end();
+
+            return $state;
+        } catch (\Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->abort();
+            }
+            throw $e;
+        }
+    }
+
     public function cleanExpired(int $ttlSeconds): int
     {
         if ($ttlSeconds < 1) {
@@ -184,11 +213,28 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
     }
 
     /**
+     * The full projection every read path shares.
+     *
+     * Kept in one place so `get()`, `lockForUpdate()` and the multipart columns
+     * can never drift apart; forgetting a column in the locking read is exactly
+     * how a multipart upload id silently vanishes mid-concurrency-test.
+     */
+    private function selectColumns(): string
+    {
+        return 'identifier, total_chunks, total_size, original_filename, uploaded_chunks, '
+            . 'is_completed, final_path, multipart_upload_id, part_etags';
+    }
+
+    /**
      * Provisions the upload-state table if it does not already exist.
      *
      * Accounts for the schema differences between SQLite/MySQL/PostgreSQL. The
      * `updated_at` column uses the platform timestamp type where the value is a
      * unix epoch; see {@see writeTimestamp()} for the cross-dialect integer form.
+     *
+     * Existing deployments provisioned with an older release are migrated in
+     * place: the two multipart columns are added when absent, so upgrading the
+     * package never requires dropping and recreating the table.
      */
     public function ensureSchema(): void
     {
@@ -224,8 +270,28 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
                     . ')',
                 );
             }
+
+            $this->migrateMultipartColumns($table);
         } catch (PDOException $e) {
             throw new MetadataException('Unable to create upload-state schema.', 0, $e);
+        }
+    }
+
+    /**
+     * Adds the multipart columns to a table created by an older release.
+     *
+     * `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so the new
+     * columns are added separately and only when actually missing.
+     */
+    private function migrateMultipartColumns(string $table): void
+    {
+        foreach (['multipart_upload_id', 'part_etags'] as $column) {
+            try {
+                $this->pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' TEXT NULL');
+            } catch (PDOException) {
+                // "Duplicate column name": the column is already present, which
+                // is the expected outcome on every run after the first.
+            }
         }
     }
 
@@ -285,8 +351,8 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
     {
         $driver = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
         $forUpdate = $driver === 'sqlite' ? '' : ' FOR UPDATE';
-        $sql = 'SELECT identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path '
-            . 'FROM ' . $this->quoteIdent($this->tableName) . ' WHERE identifier = :id' . $forUpdate;
+        $sql = 'SELECT ' . $this->selectColumns()
+            . ' FROM ' . $this->quoteIdent($this->tableName) . ' WHERE identifier = :id' . $forUpdate;
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute([':id' => $identifier]);
@@ -311,57 +377,115 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
             ':uploaded' => $this->encodeChunks($state->uploadedChunks),
             ':completed' => $state->isCompleted ? 1 : 0,
             ':finalPath' => $state->finalPath,
+            ':multipartId' => $state->multipartUploadId,
+            ':partEtags' => $this->encodePartEtags($state->partEtags),
             ':updatedAt' => time(),
         ];
 
+        $columns = '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, '
+            . 'final_path, multipart_upload_id, part_etags, updated_at) ';
+        $values = 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, '
+            . ':finalPath, :multipartId, :partEtags, :updatedAt) ';
+
         if ($driver === 'sqlite') {
             if ($this->supportsSqliteUpsert()) {
-                $sql = 'INSERT INTO ' . $table . ' '
-                    . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
-                    . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
-                    . 'ON CONFLICT(identifier) DO UPDATE SET '
+                $sql = 'INSERT INTO ' . $table . ' ' . $columns . $values . 'ON CONFLICT(identifier) DO UPDATE SET '
                     . 'total_chunks = excluded.total_chunks, '
                     . 'total_size = excluded.total_size, '
                     . 'original_filename = excluded.original_filename, '
                     . 'uploaded_chunks = excluded.uploaded_chunks, '
                     . 'is_completed = excluded.is_completed, '
                     . 'final_path = excluded.final_path, '
+                    . 'multipart_upload_id = excluded.multipart_upload_id, '
+                    . 'part_etags = excluded.part_etags, '
                     . 'updated_at = excluded.updated_at';
             } else {
                 // ON CONFLICT ... DO UPDATE requires SQLite >= 3.24; on legacy
                 // builds INSERT OR REPLACE is the only atomic upsert available.
-                $sql = 'INSERT OR REPLACE INTO ' . $table . ' '
-                    . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
-                    . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt)';
+                $sql = 'INSERT OR REPLACE INTO ' . $table . ' ' . $columns . $values;
             }
         } elseif ($driver === 'pgsql') {
-            $sql = 'INSERT INTO ' . $table . ' '
-                . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
-                . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
-                . 'ON CONFLICT(identifier) DO UPDATE SET '
+            $sql = 'INSERT INTO ' . $table . ' ' . $columns . $values . 'ON CONFLICT(identifier) DO UPDATE SET '
                 . 'total_chunks = EXCLUDED.total_chunks, '
                 . 'total_size = EXCLUDED.total_size, '
                 . 'original_filename = EXCLUDED.original_filename, '
                 . 'uploaded_chunks = EXCLUDED.uploaded_chunks, '
                 . 'is_completed = EXCLUDED.is_completed, '
                 . 'final_path = EXCLUDED.final_path, '
+                . 'multipart_upload_id = EXCLUDED.multipart_upload_id, '
+                . 'part_etags = EXCLUDED.part_etags, '
                 . 'updated_at = EXCLUDED.updated_at';
         } else {
-            $sql = 'INSERT INTO ' . $table . ' '
-                . '(identifier, total_chunks, total_size, original_filename, uploaded_chunks, is_completed, final_path, updated_at) '
-                . 'VALUES (:identifier, :totalChunks, :totalSize, :filename, :uploaded, :completed, :finalPath, :updatedAt) '
-                . 'ON DUPLICATE KEY UPDATE '
+            $sql = 'INSERT INTO ' . $table . ' ' . $columns . $values . 'ON DUPLICATE KEY UPDATE '
                 . 'total_chunks = VALUES(total_chunks), '
                 . 'total_size = VALUES(total_size), '
                 . 'original_filename = VALUES(original_filename), '
                 . 'uploaded_chunks = VALUES(uploaded_chunks), '
                 . 'is_completed = VALUES(is_completed), '
                 . 'final_path = VALUES(final_path), '
+                . 'multipart_upload_id = VALUES(multipart_upload_id), '
+                . 'part_etags = VALUES(part_etags), '
                 . 'updated_at = VALUES(updated_at)';
         }
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
+    }
+
+    /**
+     * @param array<int, string> $etags
+     */
+    private function encodePartEtags(array $etags): string
+    {
+        if ($etags === []) {
+            return '{}';
+        }
+
+        $json = json_encode($etags);
+        if ($json === false) {
+            throw new MetadataException('Unable to serialize part ETags.');
+        }
+
+        return $json;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function decodePartEtags(mixed $raw): array
+    {
+        if ($raw === null || $raw === '' || $raw === '{}' || $raw === '[]') {
+            return [];
+        }
+
+        $data = json_decode((string) $raw, true);
+        if (!is_array($data)) {
+            throw new MetadataException('Stored part ETags are corrupt.');
+        }
+
+        $etags = [];
+        foreach ($data as $partNumber => $etag) {
+            // json_decode() with associative mode turns numeric object keys into
+            // PHP integers, so both key types must be accepted here; a string-only
+            // check would silently discard every ETag on read-back.
+            if (is_int($partNumber)) {
+                $part = $partNumber;
+            } elseif (is_string($partNumber) && ctype_digit($partNumber)) {
+                $part = (int) $partNumber;
+            } else {
+                continue;
+            }
+
+            if ($part < 1 || !is_scalar($etag)) {
+                continue;
+            }
+
+            $etags[$part] = (string) $etag;
+        }
+
+        ksort($etags, SORT_NUMERIC);
+
+        return $etags;
     }
 
     /**
@@ -433,8 +557,27 @@ class PdoMetadataRepository implements MetadataRepositoryInterface, ProgressTrac
             originalFilename: (string) $row['original_filename'],
             uploadedChunks: $this->decodeChunks((string) $row['uploaded_chunks']),
             isCompleted: (bool) $row['is_completed'],
-            finalPath: $row['final_path'] === null ? null : (string) $row['final_path'],
+            finalPath: $this->nullableString($row['final_path'] ?? null),
+            multipartUploadId: $this->nullableString($row['multipart_upload_id'] ?? null),
+            partEtags: $this->decodePartEtags($row['part_etags'] ?? null),
         );
+    }
+
+    /**
+     * Reads an optional text column, mapping NULL and the empty string to null.
+     *
+     * Row values are `mixed` as far as static analysis is concerned, so the
+     * empty-string case is normalized explicitly: PDO returns NULL for SQL NULL,
+     * but an empty multipart_upload_id means "no upload in progress" rather than
+     * an upload identified by the empty string.
+     */
+    private function nullableString(mixed $value): ?string
+    {
+        if (!is_string($value) || $value === '') {
+            return null;
+        }
+
+        return $value;
     }
 
     /**

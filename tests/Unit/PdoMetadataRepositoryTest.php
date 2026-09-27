@@ -46,6 +46,83 @@ final class PdoMetadataRepositoryTest extends TestCase
     }
 
     #[Test]
+    public function test_it_round_trips_the_multipart_upload_id_and_part_etags(): void
+    {
+        // These two fields are what make an S3 upload resumable: without the
+        // UploadId a resumed upload has no handle, and without the ETags it
+        // cannot be completed.
+        $state = $this->state('multipart', [0, 1])
+            ->withMultipartUploadId('upload-abc')
+            ->withPartEtag(1, '"e1"')
+            ->withPartEtag(2, '"e2"');
+        $this->repository->save($state);
+
+        $loaded = $this->repository->get('multipart');
+
+        self::assertNotNull($loaded);
+        self::assertSame('upload-abc', $loaded->multipartUploadId);
+        self::assertSame([1 => '"e1"', 2 => '"e2"'], $loaded->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_persists_across_a_fresh_read(): void
+    {
+        $this->repository->save($this->state('etag', [0]));
+
+        $this->repository->recordPartEtag('etag', 1, '"e1"');
+        $this->repository->recordPartEtag('etag', 2, '"e2"');
+
+        $loaded = $this->repository->get('etag');
+        self::assertNotNull($loaded);
+        self::assertSame([1 => '"e1"', 2 => '"e2"'], $loaded->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_overwrites_a_retry_of_the_same_part(): void
+    {
+        $this->repository->save($this->state('retry', [0]));
+        $this->repository->recordPartEtag('retry', 1, '"stale"');
+
+        // Re-uploading a part replaces its ETag; keeping the old one would make
+        // completion assemble a corrupt object.
+        $this->repository->recordPartEtag('retry', 1, '"fresh"');
+
+        self::assertSame([1 => '"fresh"'], $this->repository->get('retry')?->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_rejects_a_non_positive_part_number(): void
+    {
+        $this->repository->save($this->state('bad', [0]));
+
+        $this->expectException(MetadataException::class);
+        $this->repository->recordPartEtag('bad', 0, '"e"');
+    }
+
+    #[Test]
+    public function test_record_part_etag_throws_for_an_unknown_upload(): void
+    {
+        $this->expectException(MetadataException::class);
+        $this->expectExceptionMessageMatches('/not found/');
+        $this->repository->recordPartEtag('nope', 1, '"e"');
+    }
+
+    #[Test]
+    public function test_record_part_etag_does_not_disturb_progress_counters(): void
+    {
+        $this->repository->save($this->state('mixed', [0, 1]));
+        $this->repository->recordPartEtag('mixed', 1, '"e1"');
+        $this->repository->markChunkAsUploaded('mixed', 2);
+        $this->repository->markChunkAsUploaded('mixed', 3);
+
+        $loaded = $this->repository->get('mixed');
+        self::assertNotNull($loaded);
+        self::assertSame([0, 1, 2, 3], $loaded->uploadedChunks);
+        self::assertSame([1 => '"e1"'], $loaded->partEtags);
+        self::assertTrue($loaded->isCompleted);
+    }
+
+    #[Test]
     public function test_get_returns_null_for_an_unknown_identifier(): void
     {
         self::assertNull($this->repository->get('missing'));

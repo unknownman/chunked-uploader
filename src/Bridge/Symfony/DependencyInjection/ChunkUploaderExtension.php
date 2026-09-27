@@ -16,6 +16,8 @@ use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
 use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
 use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
 use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
+use Resumable\ChunkedUploader\Core\Security\MagicByteValidator;
+use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
 
 /**
  * Loads the bundle's container configuration.
@@ -33,6 +35,8 @@ class ChunkUploaderExtension extends Extension
 
         $loader = new PhpFileLoader($container, new FileLocator(__DIR__ . '/../Resources/config'));
         $loader->load('services.php');
+
+        $this->registerValidationPipeline($config, $container);
 
         $this->wireMetadataConnection($config, $container);
 
@@ -54,10 +58,13 @@ class ChunkUploaderExtension extends Extension
             'chunk_uploader.rate_limiting.max_attempts' => $config['rate_limiting']['max_attempts'],
             'chunk_uploader.rate_limiting.decay_seconds' => $config['rate_limiting']['decay_seconds'],
             'chunk_uploader.rate_limiting.key' => $config['rate_limiting']['key'],
+            'chunk_uploader.assembly_lock.ttl' => $config['assembly_lock']['ttl'],
+            'chunk_uploader.assembly_lock.wait_seconds' => $config['assembly_lock']['wait_seconds'],
             'chunk_uploader.storage' => $config['storage'],
             'chunk_uploader.local.base_directory' => $config['local']['base_directory'],
             'chunk_uploader.s3.bucket' => $config['s3']['bucket'],
             'chunk_uploader.s3.prefix' => $config['s3']['prefix'],
+            'chunk_uploader.s3.final_prefix' => $config['s3']['final_prefix'],
             'chunk_uploader.s3.config' => [
                 'version' => $config['s3']['config']['version'],
                 'region' => $config['s3']['config']['region'],
@@ -66,6 +73,7 @@ class ChunkUploaderExtension extends Extension
                     'secret' => $config['s3']['config']['secret'],
                 ],
             ],
+            'chunk_uploader.checksum_verify' => $config['checksum_verify'],
             'chunk_uploader.metadata' => $config['metadata'],
             'chunk_uploader.redis.client' => $config['redis']['client'],
             'chunk_uploader.redis.prefix' => $config['redis']['prefix'],
@@ -87,6 +95,32 @@ class ChunkUploaderExtension extends Extension
      * limiter is only registered when flood protection is requested and must be
      * pointed at an existing Redis connection service.
      *
+     * @param array<string, mixed> $config
+     */
+    /**
+     * Wires the validation pipeline.
+     *
+     * Declared here rather than in services.php because the digest rule is the
+     * one conditional member of the list, and the PHP-DSL cannot express an
+     * optional entry without either duplicating the list or adding a runtime
+     * expression language dependency.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function registerValidationPipeline(array $config, ContainerBuilder $container): void
+    {
+        $container->register(ValidationPipeline::class, ValidationPipeline::class)
+            ->setFactory([ValidationPipelineFactory::class, 'create'])
+            ->setArguments([
+                $config['max_chunk_size'],
+                $config['max_file_size'],
+                $config['allowed_mime_types'],
+                new Reference(MagicByteValidator::class),
+                $config['checksum_verify'],
+            ]);
+    }
+
+    /**
      * @param array<string, mixed> $config
      */
     private function registerSecurityServices(array $config, ContainerBuilder $container): void

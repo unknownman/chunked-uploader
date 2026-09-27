@@ -46,6 +46,82 @@ final class RedisMetadataRepositoryTest extends TestCase
     }
 
     #[Test]
+    public function test_it_round_trips_the_multipart_upload_id_and_part_etags(): void
+    {
+        $state = (new UploadState('mp', 2, 8, 'x.bin'))
+            ->withMultipartUploadId('upload-abc')
+            ->withPartEtag(1, '"e1"')
+            ->withPartEtag(2, '"e2"');
+        $this->repository->save($state);
+
+        $loaded = $this->repository->get('mp');
+
+        self::assertNotNull($loaded);
+        self::assertSame('upload-abc', $loaded->multipartUploadId);
+        self::assertSame([1 => '"e1"', 2 => '"e2"'], $loaded->partEtags);
+    }
+
+    #[Test]
+    public function test_part_etags_survive_a_round_trip_through_the_lua_script(): void
+    {
+        $this->repository->save(new UploadState('lua', 3, 30, 'x.bin'));
+
+        $this->repository->recordPartEtag('lua', 1, '"e1"');
+        $this->repository->recordPartEtag('lua', 2, '"e2"');
+        $this->repository->recordPartEtag('lua', 3, '"e3"');
+
+        // The Lua script writes the map with non-numeric keys on purpose: a
+        // cjson table keyed 1..n round-trips as a JSON *array*, which would
+        // silently corrupt the part-number -> ETag mapping.
+        self::assertSame([1 => '"e1"', 2 => '"e2"', 3 => '"e3"'], $this->repository->get('lua')?->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_overwrites_a_retry_of_the_same_part(): void
+    {
+        $this->repository->save(new UploadState('retry', 1, 4, 'x.bin'));
+
+        $this->repository->recordPartEtag('retry', 1, '"stale"');
+        $this->repository->recordPartEtag('retry', 1, '"fresh"');
+
+        self::assertSame([1 => '"fresh"'], $this->repository->get('retry')?->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_preserves_the_multipart_id_and_progress(): void
+    {
+        $this->repository->save(
+            (new UploadState('keep', 2, 8, 'x.bin'))->withMultipartUploadId('upload-abc'),
+        );
+
+        $this->repository->markChunkAsUploaded('keep', 0);
+        $this->repository->recordPartEtag('keep', 1, '"e1"');
+
+        $loaded = $this->repository->get('keep');
+        self::assertNotNull($loaded);
+        self::assertSame('upload-abc', $loaded->multipartUploadId);
+        self::assertSame([0], $loaded->uploadedChunks);
+        self::assertSame([1 => '"e1"'], $loaded->partEtags);
+    }
+
+    #[Test]
+    public function test_record_part_etag_raises_metadata_error_for_an_unknown_upload(): void
+    {
+        $this->expectException(MetadataException::class);
+        $this->expectExceptionMessageMatches('/not found/');
+        $this->repository->recordPartEtag('never', 1, '"e"');
+    }
+
+    #[Test]
+    public function test_record_part_etag_rejects_a_non_positive_part_number(): void
+    {
+        $this->repository->save(new UploadState('bad', 1, 4, 'x.bin'));
+
+        $this->expectException(MetadataException::class);
+        $this->repository->recordPartEtag('bad', 0, '"e"');
+    }
+
+    #[Test]
     public function test_delete_removes_the_key_and_is_idempotent(): void
     {
         $this->repository->save(new UploadState('gone', 1, 100, 'a.txt', []));

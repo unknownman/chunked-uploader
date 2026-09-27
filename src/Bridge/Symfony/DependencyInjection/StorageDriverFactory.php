@@ -8,6 +8,7 @@ namespace Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection;
 
 use Aws\S3\S3Client;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
+use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\S3ChunkStorage;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
@@ -28,6 +29,8 @@ final class StorageDriverFactory
         private readonly string $s3Prefix,
         private readonly array $s3Config,
         private readonly PathSanitizer $sanitizer,
+        private readonly MetadataRepositoryInterface $metadata,
+        private readonly string $s3FinalPrefix = 'uploads/',
     ) {
     }
 
@@ -39,6 +42,11 @@ final class StorageDriverFactory
                 bucket: $this->s3Bucket,
                 basePrefix: $this->s3Prefix,
                 sanitizer: $this->sanitizer,
+                // The S3 driver records the multipart UploadId and every part
+                // ETag here, which is what makes an upload resumable across
+                // stateless requests.
+                metadata: $this->metadata,
+                finalPrefix: $this->s3FinalPrefix,
             );
         }
 

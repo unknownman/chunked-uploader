@@ -35,6 +35,8 @@ large it is.
   - [Symfony 6 / 7](#symfony-6--7)
 - [Vanilla JavaScript client](#vanilla-javascript-client)
 - [Security model](#security-model)
+- [Concurrent assembly (distributed locking)](#concurrent-assembly-distributed-locking)
+- [End-to-end chunk checksums](#end-to-end-chunk-checksums)
 - [API reference](#api-reference)
 - [Configuration options](#configuration-options)
 - [Testing](#testing)
@@ -55,6 +57,8 @@ large it is.
     fails, so transient database errors do not create permanent orphan bytes.
 - **Bounded cleanup** scans local directories, S3 pages, Redis cursors, and PDO
     rows incrementally, including S3 deletion batches larger than 1,000 objects.
+    The S3 sweeper also aborts stale multipart uploads, whose parts are invisible
+    to a normal object listing and would otherwise keep accruing storage cost.
 - **`ChunkUploader`** is the single canonical coordinator.
 - **Optional PHP 8 attributes** provide endpoint-specific immutable config
     overrides without changing global defaults.
@@ -317,6 +321,7 @@ chunk_uploader:
     s3:
         bucket: 'my-bucket'
         prefix: 'chunks/'
+        final_prefix: 'uploads/'            # where the assembled object is written
         config: { version: latest, region: eu-west-1, key: ~, secret: ~ }
     metadata: redis                        # redis | pdo
     redis:
@@ -338,6 +343,23 @@ chunk_uploader:
         key: 'chunked-uploader:chunks'
 ```
 
+> **S3 uploads use native multipart transfers.** The S3 driver opens a
+> `CreateMultipartUpload` on the first chunk, sends each chunk as an
+> `UploadPart`, and finishes with `CompleteMultipartUpload`, so the object store
+> performs the concatenation instead of the server streaming every byte twice.
+>
+> The `UploadId` and each part's `ETag` are persisted in the metadata repository,
+> which is what lets an upload resume across requests and web nodes. The final
+> object lands at `<prefix><identifier>/<final_prefix><filename>`; both the driver
+> and the assembler resolve that key from one place, so they cannot disagree.
+>
+> **S3 requires every part except the last to be at least 5 MiB**, and allows at
+> most 10,000 parts. The client's default 2 MiB chunk size therefore *fails* for
+> any multi-chunk S3 upload — configure a larger chunk size (e.g. 8 MiB) when
+> `storage: s3`, or keep 2 MiB for local storage. This is enforced up front with
+> an actionable message rather than surfacing as an opaque `EntityTooSmall` at
+> completion time.
+
 **3. Add routes via attribute on the controller**
 
 The example at [`examples/symfony/ChunkUploadController.php`](examples/symfony/ChunkUploadController.php)
@@ -346,6 +368,13 @@ uses attribute routing and constructor injection, so no routing YAML is needed.
 ---
 
 ## Vanilla JavaScript client
+
+> **Looking for the client?** The production-grade, typed TypeScript client now
+> lives in [`js-client/`](js-client/) and is published as
+> `@resumable/chunked-uploader-client`. It is strictly dependency-free, ships
+> ESM + CJS + type declarations, and speaks the exact same wire protocol. Use it
+> in new projects; the single-file demo below is retained only so the backend can
+> be exercised with no build step.
 
 A 100% dependency-free ES6+ client, using `Blob.prototype.slice()`, the Fetch
 API and `FormData`, is included in [`examples/vanilla-js/`](examples/vanilla-js/).
@@ -408,6 +437,148 @@ browser for a ready-to-run drag-and-drop demo.
 
 ---
 
+## Concurrent assembly (distributed locking)
+
+When the last chunks of a file reach different servers at the same moment,
+every one of those requests sees a complete upload and would otherwise enter the
+assembler. That produces a real failure, not just wasted work:
+
+- **S3** — two `CompleteMultipartUpload` calls on one upload id. The loser gets
+  `NoSuchUpload`, and a retrying client can then abort the multipart upload or
+  delete the parts the winner just finalized.
+- **Local storage** — two processes writing the same destination file, so the
+  result is whichever write lands last.
+
+`ChunkUploader` therefore takes a short distributed lock on
+`assembly:lock:<identifier>` around the assemble-and-publish step, re-reads the
+upload state *after* acquiring it, and releases it in a `finally` block. The lock
+follows the configured **metadata** driver, so it reuses that driver's existing
+connection instead of introducing a second backend to provision.
+
+```php
+$locks = new RedisLockManager($redis);              // or new PdoLockManager($pdo)
+
+$uploader = new ChunkUploader(
+    storage: $storage,
+    metadata: $metadata,
+    progress: $progress,
+    assembler: $assembler,
+    validator: $validator,
+    dispatcher: $dispatcher,
+    lockManager: $locks,
+    assemblyLockTtl: 60,        // lease length in seconds
+    assemblyWaitSeconds: 10,    // how long a losing request polls for the winner
+);
+```
+
+Laravel and Symfony wire this for you from `chunk-uploader.assembly_lock.ttl`
+and `chunk-uploader.assembly_lock.wait_seconds` (Laravel:
+`CHUNK_UPLOADER_ASSEMBLY_LOCK_TTL`, `CHUNK_UPLOADER_ASSEMBLY_LOCK_WAIT`).
+Passing `lockManager: null` — or simply omitting it — keeps the previous
+single-node behaviour, so existing integrations are unaffected.
+
+**How each driver stays correct**
+
+| Driver | Acquire | Release |
+| --- | --- | --- |
+| `RedisLockManager` | `SET key token NX PX ttl` — one atomic command, so no check-then-set window | Lua compare-and-delete; a node whose lease lapsed cannot free a successor's lock |
+| `PdoLockManager` | `INSERT` against a primary key on `lock_key`; the unique violation *is* the lost-race signal, so no `SELECT`-then-`INSERT` gap | `DELETE ... WHERE lock_key = ? AND token = ?` |
+
+Both hold a **self-expiring lease**, so a node that is killed mid-assembly
+cannot wedge the upload permanently. A loser that finds the lock busy polls for
+the winner's published `finalPath`; if its budget runs out it returns the
+current state (with `finalPath` still `null`) rather than reporting a failure
+for work another node is still finishing.
+
+Set `assemblyLockTtl` above your slowest realistic assembly time — the lease is
+set once and is not renewed mid-assembly, so a TTL shorter than a slow assembly
+lets a second node start a duplicate one.
+
+---
+
+## End-to-end chunk checksums
+
+A chunk digest is only worth computing if something checks the bytes that
+actually crossed the network. Verifying in PHP proves the copy the web server
+wrote to local disk is intact; it cannot see corruption introduced between PHP
+and the storage backend. With the S3 driver the digest is forwarded to S3, which
+hashes the part it received and rejects the upload itself.
+
+The browser client computes the digest by default:
+
+```ts
+const uploader = new ChunkedUploader({
+  file,
+  endpoint: '/upload',
+  // Defaults to 'sha256'. Use false to skip it, e.g. against a driver that
+  // re-hashes parts itself.
+  checksum: 'sha256',
+});
+```
+
+`crypto.subtle` is only exposed in secure contexts, so on a plain-HTTP origin
+the field is simply omitted rather than failing an upload that would otherwise
+succeed. WebCrypto has no MD5; requesting `checksum: 'md5'` without a `digest`
+hook fails immediately rather than quietly skipping verification:
+
+```ts
+import md5 from 'fast-md5';
+
+const uploader = new ChunkedUploader({
+  file,
+  endpoint: '/upload',
+  checksum: 'md5',
+  // The hook returns raw bytes; the client owns the base64 encoding.
+  digest: async (blob) => md5(await blob.arrayBuffer()),
+});
+```
+
+### On the server
+
+The `checksum` request field is decoded by `Core\Security\ChunkChecksum`, which
+accepts either hex or base64 and normalises to raw bytes, so digests produced by
+PHP, a browser, or a shell tool all work. Malformed digests raise
+`InvalidChunkException`; a blank value means "no digest supplied" and is not an
+error.
+
+Storage forwards the digest to S3 as `ChecksumSHA256` (SHA-256) or `ContentMD5`
+(MD5). S3 rejections are translated into typed exceptions, distinguishing the
+two cases that matter:
+
+| S3 error | Meaning |
+| --- | --- |
+| `BadDigest` | Bytes diverged in transit; re-sending the chunk can help. |
+| `XAmzContentSHA256Mismatch` | Same, for SHA-256. |
+| `InvalidDigest` | The digest itself was malformed. Retrying identical bytes fails again, so this is reported as a client bug. |
+
+### Choosing where verification happens
+
+`checksum_verify` controls whether PHP also re-hashes the temp file:
+
+| Mode | Behaviour |
+| --- | --- |
+| `local` (default) | `ChecksumRule` re-reads the chunk from disk and hashes it. Correct for the local driver. |
+| `storage` | The rule is omitted and the backend verifies the part. **Use this with the S3 driver.** |
+
+Leaving the default alongside S3 hashes every chunk twice — once in PHP against
+the temp file, and again inside S3 against the part it received — for no
+additional coverage.
+
+```dotenv
+# Laravel
+CHUNK_UPLOADER_STORAGE=s3
+CHUNK_UPLOADER_CHECKSUM_VERIFY=storage
+```
+
+```yaml
+# Symfony
+chunk_uploader:
+    storage: s3
+    checksum_verify: storage
+```
+
+---
+
 ## API reference
 
 ### `ChunkUploaderInterface`
@@ -437,6 +608,7 @@ browser for a ready-to-run drag-and-drop demo.
 | `MetadataRepositoryInterface` | `save`, `get`, `delete`, `markChunkAsUploaded`, `cleanExpired` |
 | `ProgressTrackerInterface` | `getPercentage`, `isComplete`, `getMissingChunkIndices` |
 | `FileAssemblerInterface` | `assemble(UploadState, ChunkStorageInterface): string` |
+| `LockManagerInterface` | `acquire(string, int $ttlSeconds = 60): bool`, `release(string): void` |
 | `ValidationRuleInterface` | `validate(Chunk): void` |
 | `ChunkValidatorInterface` | `validate(Chunk): bool` |
 | `VirusScannerInterface` | `scan(string): void` |
@@ -501,7 +673,9 @@ contacted. The suite covers:
 
 - **Unit tests** against `PathSanitizer`, `MagicByteValidator`,
   `UploadTokenService`, `StreamAssembler` (memory ceiling), `ClamAvScanner`
-  (stream-pair seam), `RedisRateLimiter`, `S3ChunkStorage`, and
+  (stream-pair seam), `RedisRateLimiter`, `S3ChunkStorage` and
+  `S3MultipartAssembler` (native multipart lifecycle, part-number mapping, ETag
+  manifest, abort/reap paths), `UploadState`, and
   `PdoMetadataRepository` (with Postgres/MySQL dialect assertions).
 - **Feature tests** for the full sequential upload flow, out-of-order
   resumable uploads, interrupted-upload recovery (idempotent retries,

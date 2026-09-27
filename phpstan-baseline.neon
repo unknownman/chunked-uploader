@@ -12,17 +12,17 @@ parameters:
 
 		-
 			message: "#^Cannot cast mixed to int\\.$#"
-			count: 10
+			count: 12
 			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
 
 		-
 			message: "#^Cannot cast mixed to string\\.$#"
-			count: 16
+			count: 26
 			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
 
 		-
 			message: "#^Parameter \\#1 \\$name of static method Illuminate\\\\Support\\\\Facades\\\\Redis\\:\\:connection\\(\\) expects string\\|null, mixed given\\.$#"
-			count: 2
+			count: 3
 			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
 
 		-
@@ -46,8 +46,13 @@ parameters:
 			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
 
 		-
+			message: "#^Parameter \\$redis of class Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Locking\\\\RedisLockManager constructor expects Predis\\\\ClientInterface\\|Redis, mixed given\\.$#"
+			count: 1
+			path: src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php
+
+		-
 			message: "#^Cannot cast mixed to int\\.$#"
-			count: 4
+			count: 6
 			path: src/Bridge/Laravel/config/chunk-uploader.php
 
 		-
@@ -179,36 +184,6 @@ parameters:
 			message: "#^Cannot call method isLink\\(\\) on SplFileInfo\\|string\\.$#"
 			count: 1
 			path: src/Core/Drivers/Storage/LocalChunkStorage.php
-
-		-
-			message: "#^Argument of an invalid type mixed supplied for foreach, only iterables are supported\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
-
-		-
-			message: "#^Cannot access offset 'Key' on mixed\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
-
-		-
-			message: "#^Cannot access offset 'LastModified' on mixed\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
-
-		-
-			message: "#^Cannot cast mixed to string\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
-
-		-
-			message: "#^Parameter \\#1 \\$objects of method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Storage\\\\S3ChunkStorage\\:\\:purgeKeys\\(\\) expects iterable\\<array\\{Key\\: string\\}\\>, mixed given\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
-
-		-
-			message: "#^Parameter \\#1 \\$objects of method Resumable\\\\ChunkedUploader\\\\Core\\\\Drivers\\\\Storage\\\\S3ChunkStorage\\:\\:purgeKeys\\(\\) expects iterable\\<array\\{Key\\: string\\}\\>, non\\-empty\\-array\\<int\\<0, max\\>, array\\{Key\\: mixed\\}\\> given\\.$#"
-			count: 1
-			path: src/Core/Drivers/Storage/S3ChunkStorage.php
 
 		-
 			message: "#^Cannot cast mixed to int\\.$#"

@@ -54,6 +54,35 @@ return cjson.encode(state)
 LUA;
 
     /**
+     * Lua script that records a part ETag under its 1-based part number.
+     *
+     * Keys inside `partEtags` are stored with a `p` prefix ("p1", "p2", ...)
+     * rather than as bare numbers. cjson encodes a Lua table whose keys happen
+     * to be the sequential integers 1..n as a JSON *array*, and the set of
+     * part numbers for an upload in flight is nearly always exactly that, so
+     * the unprefixed form would flip between an array and an object depending
+     * on how many parts happen to have landed. Forcing a non-numeric key
+     * guarantees a stable JSON object in both directions.
+     */
+    private const RECORD_ETAG_LUA = <<<'LUA'
+local key = KEYS[1]
+local partNumber = tonumber(ARGV[1])
+local etag = ARGV[2]
+local value = redis.call('GET', key)
+if not value then
+    return nil
+end
+local state = cjson.decode(value)
+if type(state.partEtags) ~= 'table' then
+    state.partEtags = {}
+end
+state.partEtags['p' .. partNumber] = etag
+state.updatedAt = os.time()
+redis.call('SET', key, cjson.encode(state))
+return cjson.encode(state)
+LUA;
+
+    /**
      * @param \Predis\ClientInterface|\Redis $redis     Client implementation
      * @param string                         $keyPrefix Optional namespace prefix for all keys
      * @param int|null                       $ttl       Optional per-key TTL in seconds; null keeps keys indefinitely
@@ -119,6 +148,30 @@ LUA;
         if ($result === null) {
             throw new MetadataException(
                 sprintf('Cannot mark chunk %d uploaded: upload "%s" not found.', $chunkIndex, $identifier),
+            );
+        }
+
+        return $this->decode($identifier, $result);
+    }
+
+    public function recordPartEtag(string $identifier, int $partNumber, string $etag): UploadState
+    {
+        if ($partNumber < 1) {
+            throw new MetadataException('Part number must be 1 or greater.');
+        }
+
+        try {
+            $this->warm($identifier);
+            $result = $this->evaluate(self::RECORD_ETAG_LUA, $identifier, [(string) $partNumber, $etag]);
+        } catch (MetadataException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new MetadataException('Unable to record a part ETag in Redis.', 0, $e);
+        }
+
+        if ($result === null) {
+            throw new MetadataException(
+                sprintf('Cannot record ETag for part %d: upload "%s" not found.', $partNumber, $identifier),
             );
         }
 
@@ -229,10 +282,26 @@ LUA;
      */
     private function evaluateMarkChunk(string $identifier, int $chunkIndex): ?string
     {
+        return $this->evaluate(self::MARK_CHUNK_LUA, $identifier, [(string) $chunkIndex]);
+    }
+
+    /**
+     * Runs a Lua script that mutates and re-encodes the state in one round-trip.
+     *
+     * The two supported clients disagree on argument order for `EVAL`
+     * (ext-redis takes an argv array plus a key count, Predis takes a variadic
+     * list), so both dialects are handled here rather than at each call site.
+     *
+     * @param list<string> $args Arguments after KEYS[1]
+     *
+     * @return string|null JSON-encoded new state, or null when the upload does not exist
+     */
+    private function evaluate(string $script, string $identifier, array $args): ?string
+    {
         $key = $this->key($identifier);
 
         if ($this->redis instanceof \Redis) {
-            $result = $this->redis->eval(self::MARK_CHUNK_LUA, [$key, (string) $chunkIndex], 1);
+            $result = $this->redis->eval($script, array_merge([$key], $args), 1);
             if ($result === false || $result === null) {
                 return null;
             }
@@ -240,7 +309,7 @@ LUA;
             return $this->normalizeScriptResult($result);
         }
 
-        $result = $this->redis->eval(self::MARK_CHUNK_LUA, 1, $key, (string) $chunkIndex);
+        $result = $this->redis->eval($script, 1, $key, ...$args);
         if ($result === null || $result === false) {
             return null;
         }
@@ -250,15 +319,16 @@ LUA;
 
     /**
      * WARMS the Lua script cache on ext-redis so subsequent EVALSHA calls are
-     * fast; failures are tolerated because evaluateMarkChunk falls back to EVAL.
+     * fast; failures are tolerated because the scripts fall back to EVAL.
      */
     private function warm(string $identifier): void
     {
         if ($this->redis instanceof \Redis) {
             try {
                 $this->redis->script('LOAD', self::MARK_CHUNK_LUA);
+                $this->redis->script('LOAD', self::RECORD_ETAG_LUA);
             } catch (\Throwable) {
-                // The script is re-sent on every evaluation; no action needed.
+                // The scripts are re-sent on every evaluation; no action needed.
             }
         }
     }
@@ -278,6 +348,8 @@ LUA;
             'uploaded' => $state->uploadedChunks,
             'isCompleted' => $state->isCompleted,
             'finalPath' => $state->finalPath,
+            'multipartUploadId' => $state->multipartUploadId,
+            'partEtags' => $this->encodePartEtags($state->partEtags),
             'updatedAt' => time(),
         ];
 
@@ -287,6 +359,57 @@ LUA;
         }
 
         return $json;
+    }
+
+    /**
+     * Encodes the part map with the same `p` prefix the Lua script writes, so a
+     * value produced by PHP and one produced by Redis decode identically.
+     *
+     * @param array<int, string> $etags
+     *
+     * @return array<string, string>
+     */
+    private function encodePartEtags(array $etags): array
+    {
+        $encoded = [];
+
+        foreach ($etags as $partNumber => $etag) {
+            $encoded['p' . (int) $partNumber] = $etag;
+        }
+
+        return $encoded;
+    }
+
+    /**
+     * Decodes a part map tolerating both the prefixed object form written here
+     * and a bare-index form, so state written by an older build still loads.
+     *
+     * @return array<int, string>
+     */
+    private function decodePartEtags(mixed $raw): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $etags = [];
+
+        foreach ($raw as $partNumber => $etag) {
+            if (!is_scalar($etag)) {
+                continue;
+            }
+
+            $normalized = ltrim((string) $partNumber, 'p');
+            if (!ctype_digit($normalized) || (int) $normalized < 1) {
+                continue;
+            }
+
+            $etags[(int) $normalized] = (string) $etag;
+        }
+
+        ksort($etags, SORT_NUMERIC);
+
+        return $etags;
     }
 
     /**
@@ -329,6 +452,10 @@ LUA;
             uploadedChunks: $uploaded,
             isCompleted: (bool) ($data['isCompleted'] ?? false),
             finalPath: isset($data['finalPath']) ? (string) $data['finalPath'] : null,
+            multipartUploadId: isset($data['multipartUploadId']) && $data['multipartUploadId'] !== ''
+                ? (string) $data['multipartUploadId']
+                : null,
+            partEtags: $this->decodePartEtags($data['partEtags'] ?? null),
         );
     }
 }

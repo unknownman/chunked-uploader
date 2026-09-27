@@ -71,6 +71,29 @@ interface MetadataRepositoryInterface
     public function markChunkAsUploaded(string $identifier, int $chunkIndex): UploadState;
 
     /**
+     * Atomically records a storage-side part ETag against its part number.
+     *
+     * Required by object stores that assemble parts server-side (S3-compatible
+     * multipart uploads): completion needs the ordered ETag of every part, and
+     * that set has to survive a process restart exactly like the progress
+     * counters do.
+     *
+     * The write is a read-modify-write under the same lock the progress
+     * counters use, so concurrent chunk uploads cannot clobber each other's
+     * ETags. Re-recording a part number overwrites the previous ETag, which is
+     * what makes retrying a failed part upload safe.
+     *
+     * @param string $identifier The upload whose part map is extended
+     * @param int    $partNumber 1-based part number, as used by the object store
+     * @param string $etag       Entity tag reported by the store for that part
+     *
+     * @return UploadState The up-to-date state after the ETag was recorded
+     *
+     * @throws MetadataException when the upload is unknown or the write fails
+     */
+    public function recordPartEtag(string $identifier, int $partNumber, string $etag): UploadState;
+
+    /**
      * Removes stale metadata records that have not been updated within the TTL
      * window.
      *

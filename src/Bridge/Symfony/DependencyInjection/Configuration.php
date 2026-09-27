@@ -48,6 +48,20 @@ final class Configuration implements ConfigurationInterface
                         ->scalarNode('key')->defaultValue('chunked-uploader:chunks')->end()
                     ->end()
                 ->end()
+                ->arrayNode('assembly_lock')
+                    ->addDefaultsIfNotSet()
+                    ->info('Serializes final file assembly so concurrent final chunks across nodes produce exactly one final object. TTL must exceed the slowest expected assembly.')
+                    ->children()
+                        ->integerNode('ttl')->min(1)->defaultValue(60)->end()
+                        ->integerNode('wait_seconds')->min(0)->defaultValue(10)->end()
+                    ->end()
+                ->end()
+                // Where a client-supplied digest is checked. 'local' re-hashes the
+                // temp file in PHP; 'storage' forwards the digest to the backend so it
+                // verifies the bytes it actually received. The latter is the only
+                // check that can catch corruption introduced on the wire, and avoids
+                // hashing every chunk twice when paired with the S3 driver.
+                ->enumNode('checksum_verify')->values(['local', 'storage'])->defaultValue('local')->end()
                 ->enumNode('storage')->values(['local', 's3'])->defaultValue('local')->end()
                 ->arrayNode('local')
                     ->addDefaultsIfNotSet()
@@ -62,6 +76,9 @@ final class Configuration implements ConfigurationInterface
                     ->children()
                         ->scalarNode('bucket')->defaultValue('')->end()
                         ->scalarNode('prefix')->defaultValue('chunks/')->end()
+                        // Key prefix for the object S3 assembles from the uploaded
+                        // parts, relative to each upload's namespace.
+                        ->scalarNode('final_prefix')->defaultValue('uploads/')->end()
                         ->arrayNode('config')
                             ->addDefaultsIfNotSet()
                             ->children()

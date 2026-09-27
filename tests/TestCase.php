@@ -355,6 +355,15 @@ final class InMemoryMetadataRepository implements MetadataRepositoryInterface, P
         return $state;
     }
 
+    public function recordPartEtag(string $identifier, int $partNumber, string $etag): UploadState
+    {
+        $state = $this->states[$identifier] ?? throw new \RuntimeException('Missing test state.');
+        $state = $state->withPartEtag($partNumber, $etag);
+        $this->states[$identifier] = $state;
+        $this->updatedAt[$identifier] = time();
+        return $state;
+    }
+
     public function cleanExpired(int $ttlSeconds): int
     {
         $cutoff = time() - $ttlSeconds;

@@ -109,6 +109,10 @@ final class ChunkUploadController
             totalSize: (int) $request->request->get('totalSize', 0),
             tmpFilePath: (string) $file->getRealPath(),
             originalFilename: $original,
+            // Optional client-computed digest (hex or base64 SHA-256/MD5). With the
+            // S3 driver it is forwarded so S3 verifies the bytes it received, rather
+            // than the server re-hashing the part off its own disk.
+            checksum: $this->readChecksum($request->request->get('checksum')),
         );
 
         try {
@@ -125,6 +129,24 @@ final class ChunkUploadController
             'completed' => $state->isCompleted,
             'finalPath' => $state->finalPath,
         ]);
+    }
+
+    /**
+     * Normalises the optional `checksum` form field to null when blank.
+     *
+     * Unusable values are forwarded rather than rejected here: the storage driver
+     * is what knows whether the active driver can consume a digest at all, so it
+     * owns that diagnostic instead of this controller.
+     */
+    private function readChecksum(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 
     /**

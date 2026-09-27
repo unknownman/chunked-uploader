@@ -7,14 +7,23 @@ declare(strict_types=1);
 namespace Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection;
 
 use PDO;
+use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\PdoLockManager;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\RedisLockManager;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
 
 /**
  * Builds the configured metadata repository concrete from the bundle
  * parameters, and re-exposes it as a progress tracker when supported.
+ *
+ * Also builds the assembly lock manager. The lock deliberately follows the
+ * metadata driver rather than the storage driver: assembly is coordinated
+ * through whichever datastore already holds the authoritative upload state, so
+ * that the lock and the state it protects live in the same place and share the
+ * same connection instead of requiring a second backend.
  */
 final class MetadataDriverFactory
 {
@@ -68,6 +77,40 @@ final class MetadataDriverFactory
         }
 
         return $repository;
+    }
+
+    /**
+     * Builds the assembly lock for the configured metadata driver.
+     *
+     * Reuses the exact same client/PDO instance the metadata repository uses, so
+     * a lock and the upload state it guards are guaranteed to be visible to each
+     * other and a deployment is not silently split across two datastores.
+     */
+    public function createLockManager(): LockManagerInterface
+    {
+        if ($this->driver === 'pdo') {
+            $pdo = $this->resolvePdo();
+            if ($pdo === null) {
+                throw new \RuntimeException('The PDO metadata driver requires a configured PDO connection.');
+            }
+
+            $manager = new PdoLockManager(
+                pdo: $pdo,
+                tableName: $this->pdoTable . '_locks',
+            );
+            $manager->ensureSchema();
+
+            return $manager;
+        }
+
+        if ($this->redisClient === null) {
+            throw new \RuntimeException('The Redis metadata driver requires a configured Redis client.');
+        }
+
+        return new RedisLockManager(
+            redis: $this->redisClient,
+            keyPrefix: $this->redisPrefix . 'lock:',
+        );
     }
 
     private function resolvePdo(): ?PDO

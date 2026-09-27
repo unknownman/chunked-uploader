@@ -10,10 +10,13 @@ use Illuminate\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher as LaravelDispatcherContract;
 use PHPUnit\Framework\Attributes\Test;
 use ReflectionMethod;
+use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Resumable\ChunkedUploader\Bridge\Laravel\Commands\CleanupOrphanedChunksCommand;
+use Resumable\ChunkedUploader\Bridge\Laravel\Providers\ChunkUploaderServiceProvider;
 use Resumable\ChunkedUploader\Bridge\Laravel\Events\LaravelEventDispatcher;
 use Resumable\ChunkedUploader\Bridge\Laravel\Facades\ChunkUploader;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
+use Resumable\ChunkedUploader\Core\Validation\Rules\ChecksumRule;
 use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\TestCase;
@@ -87,6 +90,67 @@ final class LaravelBridgeTest extends TestCase
         self::assertStringContainsString("'max_attempts' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_MAX'", $source);
         self::assertStringContainsString("'decay_seconds' => (int) env('CHUNK_UPLOADER_RATE_LIMIT_WINDOW'", $source);
         self::assertStringContainsString("'key' => env('CHUNK_UPLOADER_RATE_LIMIT_KEY'", $source);
+        self::assertStringContainsString("'assembly_lock' => [", $source);
+        self::assertStringContainsString("'ttl' => (int) env('CHUNK_UPLOADER_ASSEMBLY_LOCK_TTL'", $source);
+        self::assertStringContainsString("'wait_seconds' => (int) env('CHUNK_UPLOADER_ASSEMBLY_LOCK_WAIT'", $source);
+        self::assertStringContainsString("'checksum_verify' => env('CHUNK_UPLOADER_CHECKSUM_VERIFY'", $source);
+    }
+
+    #[Test]
+    public function test_the_local_digest_check_runs_in_local_mode(): void
+    {
+        self::assertInstanceOf(ChecksumRule::class, $this->checksumRuleFor('local'));
+    }
+
+    /**
+     * With S3 verifying the part it actually received, hashing the temp file in
+     * PHP as well would read and hash every chunk a second time.
+     */
+    #[Test]
+    public function test_the_local_digest_check_is_dropped_in_storage_mode(): void
+    {
+        self::assertNull($this->checksumRuleFor('storage'));
+    }
+
+    /**
+     * The default must stay 'local' so an existing deployment keeps the
+     * verification it already had after upgrading.
+     */
+    #[Test]
+    public function test_the_digest_check_defaults_to_local_when_unconfigured(): void
+    {
+        self::assertInstanceOf(ChecksumRule::class, $this->checksumRuleFor(null));
+    }
+
+    private function checksumRuleFor(?string $mode): ?ChecksumRule
+    {
+        $config = $this->createMock(ConfigRepository::class);
+        $config->method('get')->willReturnCallback(
+            // A null $mode means the key is absent, so the provider's own default
+            // has to come through rather than an explicit null.
+            static fn (string $key, $default = null) => $key === 'chunk-uploader.checksum_verify' && $mode !== null ? $mode : $default,
+        );
+
+        $provider = new ChunkUploaderServiceProvider(new Container());
+        $method = new ReflectionMethod($provider, 'checksumRule');
+
+        return $method->invoke($provider, $config);
+    }
+
+    #[Test]
+    public function test_provider_registers_an_assembly_lock_following_the_metadata_driver(): void
+    {
+        $source = file_get_contents(__DIR__ . '/../../src/Bridge/Laravel/Providers/ChunkUploaderServiceProvider.php');
+        self::assertIsString($source);
+
+        // The lock must not become a second backend to provision: it is selected
+        // from the same driver switch as the metadata repository.
+        self::assertStringContainsString('$this->registerLockManager();', $source);
+        self::assertStringContainsString('$this->app->singleton(LockManagerInterface::class', $source);
+        self::assertStringContainsString('new PdoLockManager(', $source);
+        self::assertStringContainsString('new RedisLockManager(', $source);
+        self::assertStringContainsString("'chunk-uploader.pdo.table') . '_locks'", $source);
+        self::assertStringContainsString("'chunk-uploader.redis.prefix') . 'lock:'", $source);
     }
 
     #[Test]

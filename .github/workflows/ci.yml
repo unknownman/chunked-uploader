@@ -1,19 +1,88 @@
 name: CI
 
+# ---------------------------------------------------------------------------
+# Trigger strategy
+# ---------------------------------------------------------------------------
+# The repository is a polyglot monorepo: a PHP Composer package at the root and
+# a TypeScript npm library under `js-client/`. Each ecosystem has its own
+# dependency graph and its own failure modes, so the two are gated by SEPARATE
+# top-level workflow runs rather than by job-level `if:` guards.
+#
+# Why top-level `paths:` filters instead of `if:` conditions on each job:
+#
+#   * Correct required status checks. With job-level guards, a PHP-only pull
+#     request produces a run where `test-js-client` is skipped, and a branch
+#     protection rule requiring that check will block the merge forever
+#     ("Expected — Waiting for status to be reported"). Skipped *runs* are
+#     reported as neutral/success, so path-filtered workflows behave correctly
+#     under branch protection.
+#   * Wall-clock savings. An S3 multipart-upload change should never pay for a
+#     Node toolchain install, and a client-only tweak should never wait on a
+#     4-way PHP matrix across 8.2/8.3 x prefer-stable/prefer-lowest.
+#
+# `workflow_dispatch` is intentionally absent from the `paths` filter below, so
+# a manual run always evaluates every job regardless of which files changed.
+# ---------------------------------------------------------------------------
 on:
   push:
     branches:
       - main
+    paths:
+      # --- PHP package: src/, tests/, and all PHP tooling/config ----------
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'composer.json'
+      - 'composer.lock'
+      - 'phpunit.xml'
+      - 'phpunit.xml.dist'
+      - 'phpcs.xml.dist'
+      - 'phpstan.neon'
+      - 'phpstan-baseline.neon'
+      - 'phpstan-bootstrap.php'
+      # --- JS client: its own tree, plus the shared CI definition ---------
+      - 'js-client/**'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'composer.json'
+      - 'composer.lock'
+      - 'phpunit.xml'
+      - 'phpunit.xml.dist'
+      - 'phpcs.xml.dist'
+      - 'phpstan.neon'
+      - 'phpstan-baseline.neon'
+      - 'phpstan-bootstrap.php'
+      - 'js-client/**'
+      - '.github/workflows/ci.yml'
 
+# Least privilege: this workflow only ever checks out and reads. It publishes
+# nothing, so `contents: read` is the whole requirement.
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref. For a long PHP matrix this is the
+# single biggest saving: pushing a fix-up commit should not pay for the
+# previous commit's full matrix to finish first.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # =========================================================================
+  # PHP package
+  # =========================================================================
   quality:
     name: PHP ${{ matrix.php }} / ${{ matrix.dependency-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     strategy:
+      # Never cancel sibling matrix legs on failure: a break on PHP 8.2/prefer-stable
+      # should not hide whether 8.3/prefer-lowest also broke.
       fail-fast: false
       matrix:
         php:
@@ -42,8 +111,93 @@ jobs:
         run: composer audit --no-interaction
 
       - name: Run PHPStan
+        # Only the resolved-stable graph is statically analysed; running the
+        # analyser four times over a prefer-lowest graph produces duplicate
+        # findings for packages that are not the ones we support.
         if: matrix.dependency-version == 'prefer-stable'
         run: vendor/bin/phpstan analyse --configuration=phpstan.neon --no-progress
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always
+
+  # =========================================================================
+  # TypeScript client (js-client/)
+  # =========================================================================
+  # Runs as an INDEPENDENT job with `needs:` unset, so GitHub schedules it
+  # alongside the `quality` matrix rather than after it. Total workflow time is
+  # therefore max(PHP matrix, JS job) instead of their sum.
+  test-js-client:
+    name: JS client / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      # Every `run:` step below is relative to js-client/ instead of the
+      # repository root. This is what lets the scripts stay `npm run lint`
+      # rather than `npm --prefix js-client run lint`, keeping the local
+      # developer experience and CI byte-for-byte identical.
+      run:
+        working-directory: js-client
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pin exact versions: a floating 'lts' silently changes what CI proves.
+        node:
+          - '20'
+          - '22'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          # Caches the npm *download cache* (~/.npm), not node_modules. That is
+          # the correct choice: npm ci deletes node_modules anyway, so caching
+          # it would only ever serve a stale tree. The cache key is derived
+          # from the lockfile hash, so it invalidates automatically whenever a
+          # dependency changes.
+          cache: 'npm'
+          cache-dependency-path: js-client/package-lock.json
+
+      - name: Install dependencies
+        # `npm ci`, not `npm install`: it installs strictly from the lockfile,
+        # never writes to it, and fails loudly if package.json and the lockfile
+        # have drifted apart. That makes CI prove the committed lockfile is
+        # actually installable.
+        run: npm ci
+
+      # --- Verification pipeline -----------------------------------------
+      # Each step is a separate `run:` so the failing stage is unambiguous in
+      # the GitHub UI. GitHub Actions aborts a job at the first non-zero exit
+      # code, so no explicit `if: success()` chaining is required (and adding
+      # it would be redundant).
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Unit tests (Vitest)
+        run: npm test
+
+      - name: Build (tsup)
+        # Compiling is part of the gate on purpose: tsup's dts rollup and the
+        # ESM/CJS dual emit are exactly the steps that break on a bad import
+        # or an unexported type, and a broken published artifact is far more
+        # expensive to discover than a red build here.
+        run: npm run build
+
+      - name: Upload build artifacts
+        # On failure, ship the bundle + sourcemaps so the breakage can be
+        # reproduced without a local checkout.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-client-dist-node-${{ matrix.node }}
+          path: js-client/dist/
+          retention-days: 7
+          if-no-files-found: ignore

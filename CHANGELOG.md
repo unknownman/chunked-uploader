@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- End-to-end chunk checksums. The JavaScript client computes a per-chunk digest
+  (`checksum`, defaulting to `sha256`) and sends it as the `checksum` field.
+  `crypto.subtle` has no MD5, so `md5` requires an injected `digest` hook that
+  returns raw bytes; the client owns the base64 encoding. The field is omitted
+  when `crypto.subtle` is unavailable (non-secure context) rather than failing
+  the upload.
+- `Core\Security\ChunkChecksum` normalises a client digest from either hex or
+  base64 to raw bytes, so digests from browsers, PHP, and shell tools agree.
+  This is a behaviour change for `ChecksumRule`: it now compares decoded bytes
+  instead of wire strings, which previously rejected every base64 digest.
+- `S3ChunkStorage` forwards the digest to S3 as `ChecksumSHA256` or
+  `ContentMD5`, so the object store verifies the part it actually received.
+  `BadDigest`, `XAmzContentSHA256Mismatch`, and `InvalidDigest` are translated to
+  `InvalidChunkException`, distinguishing a corrupt-in-transit part (retrying
+  helps) from a malformed digest (retrying cannot help).
+- `checksum_verify` config option (`local` | `storage`, default `local`) for both
+  bridges, selecting whether `ChecksumRule` re-hashes the temp file. Set it to
+  `storage` with the S3 driver to avoid hashing every chunk twice.
+- `ValidationPipeline` ignores `null` entries, so a container can express an
+  optional rule without duplicating the rule list.
+
 ### Changed
 - `RedisRateLimiter` now accepts either `ext-redis` (`Redis`) or
   `predis/predis` (`Predis\ClientInterface`) natively; the bespoke

@@ -11,6 +11,7 @@ use Illuminate\Contracts\Events\Dispatcher as LaravelDispatcher;
 use Illuminate\Support\ServiceProvider;
 use Resumable\ChunkedUploader\Bridge\Laravel\Commands\CleanupOrphanedChunksCommand;
 use Resumable\ChunkedUploader\Bridge\Laravel\Events\LaravelEventDispatcher;
+use Resumable\ChunkedUploader\Core\Assembler\S3MultipartAssembler;
 use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
 use Resumable\ChunkedUploader\Core\ChunkUploader;
 use Resumable\ChunkedUploader\Core\Configuration\UploaderConfig;
@@ -20,10 +21,13 @@ use Resumable\ChunkedUploader\Core\Contracts\ChunkUploaderInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkValidatorInterface;
 use Resumable\ChunkedUploader\Core\Contracts\EventDispatcherInterface;
 use Resumable\ChunkedUploader\Core\Contracts\FileAssemblerInterface;
+use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\MetadataRepositoryInterface;
 use Resumable\ChunkedUploader\Core\Contracts\ProgressTrackerInterface;
 use Resumable\ChunkedUploader\Core\Contracts\RateLimiterInterface;
 use Resumable\ChunkedUploader\Core\Contracts\VirusScannerInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\PdoLockManager;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\RedisLockManager;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Metadata\RedisMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
@@ -62,6 +66,7 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         $this->registerCore();
         $this->registerStorage();
         $this->registerMetadata();
+        $this->registerLockManager();
         $this->registerValidation();
     }
 
@@ -74,6 +79,17 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([CleanupOrphanedChunksCommand::class]);
         }
+    }
+
+    /**
+     * The local digest check, or null when the storage backend verifies chunks
+     * itself. Null entries are dropped by the pipeline.
+     */
+    private function checksumRule(ConfigRepository $config): ?ChecksumRule
+    {
+        return (string) $config->get('chunk-uploader.checksum_verify', 'local') === 'local'
+            ? new ChecksumRule()
+            : null;
     }
 
     private function registerUploaderConfig(): void
@@ -111,9 +127,26 @@ class ChunkUploaderServiceProvider extends ServiceProvider
             return new UploadTokenService($secret);
         });
 
-        $this->app->singleton(FileAssemblerInterface::class, static function (): FileAssemblerInterface {
+        $this->app->singleton(FileAssemblerInterface::class, static function ($app): FileAssemblerInterface {
             /** @var ConfigRepository $config */
             $config = app('config');
+
+            // S3 assembles the object itself from the uploaded parts, so it needs
+            // CompleteMultipartUpload rather than a client-side stream copy. The
+            // two are selected from the same `storage` value as the storage driver
+            // because they are not interchangeable: multipart parts cannot be read
+            // back individually, so pairing S3 with the streaming assembler would
+            // fail on the first chunk.
+            if ((string) $config->get('chunk-uploader.storage', 'local') === 's3') {
+                return new S3MultipartAssembler(
+                    client: new \Aws\S3\S3Client((array) $config->get('chunk-uploader.s3.config')),
+                    bucket: (string) $config->get('chunk-uploader.s3.bucket'),
+                    basePrefix: (string) $config->get('chunk-uploader.s3.prefix'),
+                    finalPrefix: (string) $config->get('chunk-uploader.s3.final_prefix', 'uploads/'),
+                    sanitizer: $app->make(PathSanitizer::class),
+                );
+            }
+
             $base = (string) $config->get('chunk-uploader.spool_directory') . '/final';
 
             return new StreamAssembler($base);
@@ -146,6 +179,9 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                 rateLimitWindow: $rateLimitWindow,
                 rateLimitKey: $rateLimitKey,
                 config: $app->make(UploaderConfig::class),
+                lockManager: $app->make(LockManagerInterface::class),
+                assemblyLockTtl: (int) $config->get('chunk-uploader.assembly_lock.ttl', 60),
+                assemblyWaitSeconds: (int) $config->get('chunk-uploader.assembly_lock.wait_seconds', 10),
             );
         });
 
@@ -218,6 +254,10 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                     bucket: (string) $config->get('chunk-uploader.s3.bucket'),
                     basePrefix: (string) $config->get('chunk-uploader.s3.prefix'),
                     sanitizer: $app->make(PathSanitizer::class),
+                    // Carries the multipart UploadId and per-part ETags, which
+                    // is what lets an upload resume across stateless requests.
+                    metadata: $app->make(MetadataRepositoryInterface::class),
+                    finalPrefix: (string) $config->get('chunk-uploader.s3.final_prefix', 'uploads/'),
                 );
             }
 
@@ -272,9 +312,49 @@ class ChunkUploaderServiceProvider extends ServiceProvider
         });
     }
 
+    /**
+     * Registers the assembly lock, following the metadata driver.
+     *
+     * The lock shares the metadata backend deliberately: assembly state and the
+     * mutex guarding it then live in one datastore, on one connection, with no
+     * second service to provision or keep in sync. Both managers hold a
+     * self-expiring lease, so a node that dies mid-assembly cannot wedge the
+     * upload for other nodes.
+     */
+    private function registerLockManager(): void
+    {
+        $this->app->singleton(LockManagerInterface::class, static function ($app): LockManagerInterface {
+            /** @var ConfigRepository $config */
+            $config = app('config');
+            $driver = (string) $config->get('chunk-uploader.metadata', 'redis');
+
+            if ($driver === 'pdo') {
+                $connection = (string) $config->get(
+                    'chunk-uploader.pdo.connection',
+                    config('database.default', 'mysql'),
+                );
+                $manager = new PdoLockManager(
+                    pdo: DB::connection($connection)->getPdo(),
+                    tableName: (string) $config->get('chunk-uploader.pdo.table') . '_locks',
+                );
+                $manager->ensureSchema();
+
+                return $manager;
+            }
+
+            $connection = Redis::connection($config->get('chunk-uploader.redis.connection'));
+
+            return new RedisLockManager(
+                redis: $connection->client(),
+                keyPrefix: (string) $config->get('chunk-uploader.redis.prefix') . 'lock:',
+            );
+        });
+    }
+
     private function registerValidation(): void
     {
-        $this->app->singleton(ChunkValidatorInterface::class, static function ($app): ChunkValidatorInterface {
+        // Not static: the closure reaches $this->checksumRule().
+        $this->app->singleton(ChunkValidatorInterface::class, function ($app): ChunkValidatorInterface {
             /** @var ConfigRepository $config */
             $config = app('config');
 
@@ -286,7 +366,10 @@ class ChunkUploaderServiceProvider extends ServiceProvider
                     (array) $config->get('chunk-uploader.allowed_mime_types'),
                 ),
                 new ExtensionMimeMatchRule($app->make(MagicByteValidator::class)),
-                new ChecksumRule(),
+                // Only meaningful when PHP verifies the chunk. In 'storage' mode the
+                // backend checks the bytes it actually received, so hashing the temp
+                // file here as well would do the work twice.
+                $this->checksumRule($config),
             ]);
 
             return new ChunkSecurityValidator(

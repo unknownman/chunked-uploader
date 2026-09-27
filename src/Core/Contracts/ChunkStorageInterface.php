@@ -8,6 +8,7 @@ namespace Resumable\ChunkedUploader\Core\Contracts;
 
 use Psr\Http\Message\StreamInterface;
 use Resumable\ChunkedUploader\Core\Exceptions\ChunkNotFoundException;
+use Resumable\ChunkedUploader\Core\Exceptions\ChunkUploaderException;
 use Resumable\ChunkedUploader\Core\Exceptions\StorageException;
 use Resumable\ChunkedUploader\Core\Models\Chunk;
 
@@ -40,6 +41,11 @@ interface ChunkStorageInterface
      * @param Chunk $chunk Immutable DTO describing the chunk to persist
      *
      * @throws StorageException when the chunk cannot be written to the medium
+     * @throws ChunkUploaderException when the driver has already classified the
+     *         failure and the caller should see the specific type -- for example
+     *         a part S3 rejected because it did not match the client digest.
+     *         Those must not be flattened into a generic retryable error, since
+     *         resending identical bytes cannot fix them.
      */
     public function store(Chunk $chunk): void;
 

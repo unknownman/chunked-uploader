@@ -88,6 +88,10 @@ final class ChunkUploadController
             'totalSize' => ['required', 'integer', 'min:1'],
             'chunkSize' => ['integer', 'min:1'],
             'originalFilename' => ['required', 'string', 'max:255'],
+            // Optional client-computed digest, hex or base64. Capped at 128
+            // characters, which still admits a 64-char hex SHA-256 and a 44-char
+            // base64 one while bounding what a caller can push into the validator.
+            'checksum' => ['nullable', 'string', 'max:128'],
         ])->validate();
 
         $file = $request->file('chunk');
@@ -106,6 +110,8 @@ final class ChunkUploadController
             totalSize: (int) $data['totalSize'],
             tmpFilePath: (string) $file->getRealPath(),
             originalFilename: $original,
+            // Forwarded so the S3 driver makes S3 verify the bytes it received.
+            checksum: $this->readChecksum($data['checksum'] ?? null),
         );
 
         try {
@@ -122,6 +128,24 @@ final class ChunkUploadController
             'completed' => $state->isCompleted,
             'finalPath' => $state->finalPath,
         ]);
+    }
+
+    /**
+     * Normalises the optional `checksum` form field to null when blank.
+     *
+     * Unusable values are forwarded rather than rejected here: the storage driver
+     * is what knows whether the active driver can consume a digest at all, so it
+     * owns that diagnostic instead of this controller.
+     */
+    private function readChecksum(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 
     /**

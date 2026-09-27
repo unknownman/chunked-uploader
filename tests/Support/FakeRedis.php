@@ -9,9 +9,12 @@ use Redis;
 /**
  * In-memory phpredis double for test doubles of the Redis-backed core classes.
  *
- * Implements the exact surface the metadata repository and rate limiter rely on:
- * get/set/del/expire/incr, plus a Lua-free eval that mimics the atomically
- * appended-chunk script. No real Redis server is ever contacted.
+ * Implements the exact surface the metadata repository, rate limiter, and lock
+ * manager rely on: get/set/del/expire/incr plus a Lua dispatcher for the
+ * append-chunk, record-ETag, and owner-checked lock-release scripts. `SET`
+ * honours the NX and PX/EX modifiers so lock mutual exclusion and leases behave
+ * as they do on a real server, rather than silently succeeding. No real Redis
+ * server is ever contacted.
  */
 final class FakeRedis extends Redis
 {
@@ -21,14 +24,49 @@ final class FakeRedis extends Redis
     /** @var array<string, int> */
     public array $expirations = [];
 
+    /**
+     * Absolute expiry timestamps set through the atomic `SET ... PX`/`EX` path.
+     *
+     * Kept separate from {@see self::$expirations}, which records the relative
+     * TTL handed to `EXPIRE` so existing assertions stay valid. Locks are only
+     * ever created via `SET NX PX`, so their lease lives here and is evaluated
+     * lazily on read, the way a real server expires keys without cooperation.
+     *
+     * @var array<string, int>
+     */
+    public array $deadlines = [];
+
     public function get(string $key): mixed
     {
+        if ($this->hasExpired($key)) {
+            return false;
+        }
+
         return $this->data[$key] ?? false;
     }
 
     public function set(string $key, mixed $value, mixed $options = null): bool
     {
+        if ($this->hasExpired($key)) {
+            $this->forget($key);
+        }
+
+        $options = $this->normalizeSetOptions($options);
+
+        if (($options['nx'] ?? false) && isset($this->data[$key])) {
+            return false;
+        }
+
         $this->data[$key] = (string) $value;
+
+        if (isset($options['px'])) {
+            $this->deadlines[$key] = time() + (int) ceil($options['px'] / 1000);
+        } elseif (isset($options['ex'])) {
+            $this->deadlines[$key] = time() + (int) $options['ex'];
+        } else {
+            unset($this->deadlines[$key]);
+        }
+
         return true;
     }
 
@@ -38,10 +76,11 @@ final class FakeRedis extends Redis
         $count = 0;
         foreach ($all as $key) {
             if (isset($this->data[$key])) {
-                unset($this->data[$key], $this->expirations[$key]);
+                $this->forget($key);
                 $count++;
             }
         }
+
         return $count;
     }
 
@@ -87,19 +126,115 @@ final class FakeRedis extends Redis
         return $page;
     }
 
+    /**
+     * Emulates the atomic Lua scripts: chunk append, part-ETag record, and the
+     * lock's owner-checked release.
+     *
+     * The scripts are dispatched by content rather than assumed, because three
+     * distinct ones exist. Treating an unfamiliar one as the chunk script would
+     * silently drop ETag writes, double-count progress, and make a lock appear
+     * releasable by any caller -- hiding exactly the bugs these tests exist to
+     * catch.
+     *
+     * @param list<mixed> $args
+     */
     public function eval(string $script, array $args = [], int $num_keys = 0): mixed
     {
-        $key = $args[0] ?? null;
-        $chunkIndex = (int) ($args[1] ?? -1);
+        if (str_contains($script, 'redis.call(\'DEL\'')) {
+            return $this->applyReleaseLock($args);
+        }
 
-        if (!is_string($key) || !isset($this->data[$key])) {
+        $key = $args[0] ?? null;
+
+        if (!is_string($key) || $this->get($key) === false) {
             return false;
         }
 
-        $state = json_decode($this->data[$key], true);
+        $state = json_decode((string) $this->data[$key], true);
         if (!is_array($state)) {
             return false;
         }
+
+        $state = str_contains($script, 'partEtags')
+            ? $this->applyRecordEtag($state, $args)
+            : $this->applyMarkChunk($state, $args);
+
+        $state['updatedAt'] = time();
+
+        $encoded = json_encode($state);
+        $this->data[$key] = (string) $encoded;
+
+        return $encoded;
+    }
+
+    /**
+     * Compare-and-delete, matching the real release script: the key is removed
+     * only when the stored token equals the caller's, so a lapsed holder cannot
+     * free a lock that a successor now owns.
+     *
+     * @param list<mixed> $args
+     */
+    private function applyReleaseLock(array $args): int
+    {
+        $key = $args[0] ?? null;
+        $token = $args[1] ?? null;
+
+        if (!is_string($key) || !is_string($token) || $this->get($key) === false) {
+            return 0;
+        }
+
+        if ($this->data[$key] !== $token) {
+            return 0;
+        }
+
+        $this->forget($key);
+
+        return 1;
+    }
+
+    /**
+     * @param array<int|string, mixed> $options
+     *
+     * @return array<string, mixed>
+     */
+    private function normalizeSetOptions(mixed $options): array
+    {
+        if (!is_array($options)) {
+            return [];
+        }
+
+        $normalized = [];
+
+        foreach ($options as $name => $value) {
+            if (is_string($name)) {
+                $normalized[strtolower($name)] = $value;
+                continue;
+            }
+
+            $normalized[strtolower((string) $value)] = true;
+        }
+
+        return $normalized;
+    }
+
+    private function hasExpired(string $key): bool
+    {
+        return isset($this->deadlines[$key]) && $this->deadlines[$key] <= time();
+    }
+
+    private function forget(string $key): void
+    {
+        unset($this->data[$key], $this->expirations[$key], $this->deadlines[$key]);
+    }
+
+    /**
+     * @param list<mixed> $args
+     *
+     * @return array<string, mixed>
+     */
+    private function applyMarkChunk(array $state, array $args): array
+    {
+        $chunkIndex = (int) ($args[1] ?? -1);
 
         $uploaded = array_map('intval', $state['uploaded'] ?? []);
         if (!in_array($chunkIndex, $uploaded, true)) {
@@ -109,11 +244,28 @@ final class FakeRedis extends Redis
 
         $state['uploaded'] = $uploaded;
         $state['isCompleted'] = count($uploaded) === (int) $state['totalChunks'];
-        $state['updatedAt'] = time();
 
-        $encoded = json_encode($state);
-        $this->data[$key] = (string) $encoded;
+        return $state;
+    }
 
-        return $encoded;
+    /**
+     * Mirrors the `p`-prefixed key convention the real script relies on to keep
+     * cjson from encoding a table keyed 1..n as a JSON array.
+     *
+     * @param list<mixed> $args
+     *
+     * @return array<string, mixed>
+     */
+    private function applyRecordEtag(array $state, array $args): array
+    {
+        $etags = $state['partEtags'] ?? [];
+        if (!is_array($etags)) {
+            $etags = [];
+        }
+
+        $etags['p' . (int) ($args[1] ?? 0)] = (string) ($args[2] ?? '');
+        $state['partEtags'] = $etags;
+
+        return $state;
     }
 }

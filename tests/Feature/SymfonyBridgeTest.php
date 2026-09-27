@@ -11,6 +11,10 @@ use Resumable\ChunkedUploader\Bridge\Symfony\Command\CleanupOrphanedChunksComman
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\ChunkUploaderExtension;
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\Configuration;
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\MetadataDriverFactory;
+use Resumable\ChunkedUploader\Core\Contracts\LockManagerInterface;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\PdoLockManager;
+use Resumable\ChunkedUploader\Core\Drivers\Locking\RedisLockManager;
+use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\AssemblerDriverFactory;
 use Resumable\ChunkedUploader\Bridge\Symfony\DependencyInjection\StorageDriverFactory;
 use Resumable\ChunkedUploader\Bridge\Symfony\Events\SymfonyEventDispatcher;
 use Resumable\ChunkedUploader\Core\Contracts\ChunkStorageInterface;
@@ -23,11 +27,19 @@ use Resumable\ChunkedUploader\Core\Drivers\Metadata\PdoMetadataRepository;
 use Resumable\ChunkedUploader\Core\Drivers\Storage\LocalChunkStorage;
 use Resumable\ChunkedUploader\Core\GarbageCollector;
 use Resumable\ChunkedUploader\Core\Security\PathSanitizer;
+use Resumable\ChunkedUploader\Core\Validation\Rules\ChecksumRule;
+use Resumable\ChunkedUploader\Core\Validation\Rules\ExtensionMimeMatchRule;
+use Resumable\ChunkedUploader\Core\Validation\Rules\MagicByteRule;
+use Resumable\ChunkedUploader\Core\Validation\Rules\MaxChunkSizeRule;
+use Resumable\ChunkedUploader\Core\Validation\Rules\MaxTotalSizeRule;
+use Resumable\ChunkedUploader\Core\Validation\ValidationPipeline;
 use Resumable\ChunkedUploader\Core\Security\RateLimiting\RedisRateLimiter;
 use Resumable\ChunkedUploader\Core\Security\Scanners\ClamAvScanner;
 use Resumable\ChunkedUploader\Core\Security\Scanners\NullVirusScanner;
 use Resumable\ChunkedUploader\Tests\InMemoryChunkStorage;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
+use Resumable\ChunkedUploader\Core\Assembler\S3MultipartAssembler;
+use Resumable\ChunkedUploader\Core\Assembler\StreamAssembler;
 use Resumable\ChunkedUploader\Tests\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -50,6 +62,7 @@ final class SymfonyBridgeTest extends TestCase
         self::assertSame(3600, $config['garbage_collection_ttl']);
         self::assertSame('local', $config['storage']);
         self::assertSame('redis', $config['metadata']);
+        self::assertSame('local', $config['checksum_verify']);
     }
 
     #[Test]
@@ -160,12 +173,42 @@ final class SymfonyBridgeTest extends TestCase
             s3Prefix: 'chunks/',
             s3Config: ['version' => 'latest', 'region' => 'us-east-1', 'credentials' => ['key' => '', 'secret' => '']],
             sanitizer: new PathSanitizer(),
+            metadata: new InMemoryMetadataRepository(),
         );
 
         $storage = $factory->create();
 
         self::assertInstanceOf(LocalChunkStorage::class, $storage);
         self::assertInstanceOf(ChunkStorageInterface::class, $storage);
+    }
+
+    #[Test]
+    public function test_assembler_driver_factory_selects_the_matching_assembler_per_driver(): void
+    {
+        $s3Config = ['version' => 'latest', 'region' => 'us-east-1', 'credentials' => ['key' => '', 'secret' => '']];
+
+        // The pairing is not cosmetic: multipart parts cannot be read back as
+        // objects, so the S3 driver would fail on the first chunk if paired with
+        // the streaming assembler.
+        $s3Assembler = (new AssemblerDriverFactory(
+            driver: 's3',
+            finalBaseDir: $this->tempDir() . '/final',
+            s3Bucket: 'bucket',
+            s3Prefix: 'chunks/',
+            s3Config: $s3Config,
+            sanitizer: new PathSanitizer(),
+        ))->create();
+        self::assertInstanceOf(S3MultipartAssembler::class, $s3Assembler);
+
+        $localAssembler = (new AssemblerDriverFactory(
+            driver: 'local',
+            finalBaseDir: $this->tempDir() . '/final',
+            s3Bucket: 'bucket',
+            s3Prefix: 'chunks/',
+            s3Config: $s3Config,
+            sanitizer: new PathSanitizer(),
+        ))->create();
+        self::assertInstanceOf(StreamAssembler::class, $localAssembler);
     }
 
     #[Test]
@@ -190,6 +233,80 @@ final class SymfonyBridgeTest extends TestCase
 
         $state = new \Resumable\ChunkedUploader\Core\Models\UploadState('track', 2, 20, 't.bin', [0], false);
         self::assertSame(50.0, $tracker->getPercentage($state));
+    }
+
+    #[Test]
+    public function test_extension_registers_the_assembly_lock_and_its_parameters(): void
+    {
+        $container = new ContainerBuilder();
+        (new ChunkUploaderExtension())->load([
+            [
+                'spool_directory' => $this->tempDir() . '/spool',
+                'local' => ['base_directory' => $this->tempDir() . '/chunks'],
+                'assembly_lock' => ['ttl' => 45, 'wait_seconds' => 3],
+            ],
+        ], $container);
+
+        self::assertSame(45, $container->getParameter('chunk_uploader.assembly_lock.ttl'));
+        self::assertSame(3, $container->getParameter('chunk_uploader.assembly_lock.wait_seconds'));
+        self::assertTrue($container->hasDefinition(LockManagerInterface::class));
+        self::assertTrue(
+            $container->getDefinition(\Resumable\ChunkedUploader\Core\ChunkUploader::class)
+                ->getArgument('$lockManager') instanceof \Symfony\Component\DependencyInjection\Reference,
+            'The uploader must receive the lock manager, not a null default.',
+        );
+    }
+
+    #[Test]
+    public function test_metadata_driver_factory_builds_a_pdo_lock_manager_on_the_same_connection(): void
+    {
+        $pdo = new \PDO('sqlite::memory:');
+        $factory = new MetadataDriverFactory(
+            driver: 'pdo',
+            redisClient: null,
+            redisPrefix: 'chunked-uploader:',
+            redisTtl: 0,
+            pdo: $pdo,
+            pdoTable: 'chunked_upload_states',
+        );
+
+        $locks = $factory->createLockManager();
+
+        self::assertInstanceOf(PdoLockManager::class, $locks);
+        // ensureSchema() ran during construction, so the lock table is ready and
+        // the very first upload is not blocked on a missing table.
+        self::assertTrue($locks->acquire('assembly:lock:x', 30));
+        self::assertFalse($factory->createLockManager()->acquire('assembly:lock:x', 30));
+    }
+
+    #[Test]
+    public function test_metadata_driver_factory_builds_a_redis_lock_manager(): void
+    {
+        $factory = new MetadataDriverFactory(
+            driver: 'redis',
+            redisClient: new \Resumable\ChunkedUploader\Tests\Support\FakeRedis(),
+            redisPrefix: 'chunked-uploader:',
+            redisTtl: 0,
+            pdo: null,
+            pdoTable: 'chunked_upload_states',
+        );
+
+        self::assertInstanceOf(RedisLockManager::class, $factory->createLockManager());
+    }
+
+    #[Test]
+    public function test_lock_manager_requires_the_same_connection_as_its_metadata_driver(): void
+    {
+        $this->expectException(\RuntimeException::class);
+
+        (new MetadataDriverFactory(
+            driver: 'redis',
+            redisClient: null,
+            redisPrefix: 'chunked-uploader:',
+            redisTtl: 0,
+            pdo: null,
+            pdoTable: 'chunked_upload_states',
+        ))->createLockManager();
     }
 
     #[Test]
@@ -307,5 +424,88 @@ final class SymfonyBridgeTest extends TestCase
         );
         $storage->store($chunk);
         $storage->ageChunks('orphaned upload', 7200);
+    }
+
+    #[Test]
+    public function test_the_local_digest_check_runs_in_local_mode(): void
+    {
+        $pipeline = $this->validationPipeline(['checksum_verify' => 'local']);
+
+        self::assertContains(ChecksumRule::class, $this->ruleClasses($pipeline));
+    }
+
+    /**
+     * With the storage backend verifying chunks, hashing the temp file in PHP
+     * too would mean reading and hashing every chunk a second time.
+     */
+    #[Test]
+    public function test_the_local_digest_check_is_dropped_in_storage_mode(): void
+    {
+        $pipeline = $this->validationPipeline(['checksum_verify' => 'storage']);
+
+        self::assertNotContains(ChecksumRule::class, $this->ruleClasses($pipeline));
+    }
+
+    #[Test]
+    public function test_dropping_the_digest_check_leaves_the_other_rules_in_place(): void
+    {
+        $pipeline = $this->validationPipeline(['checksum_verify' => 'storage']);
+
+        // Only the digest rule is conditional; size and content checks must not
+        // be collateral damage of turning verification over to the backend.
+        self::assertSame([
+            MaxChunkSizeRule::class,
+            MaxTotalSizeRule::class,
+            MagicByteRule::class,
+            ExtensionMimeMatchRule::class,
+        ], $this->ruleClasses($pipeline));
+    }
+
+    #[Test]
+    public function test_an_unknown_checksum_verify_mode_is_rejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        (new Processor())->processConfiguration(new Configuration(), [
+            'checksum_verify' => 'sideways',
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function validationPipeline(array $config): ValidationPipeline
+    {
+        $container = new ContainerBuilder();
+        $extension = new ChunkUploaderExtension();
+        $extension->load([
+            [
+                // Overridden so the tree's %kernel.project_dir% defaults are not
+                // referenced; a bare ContainerBuilder has no kernel.
+                'spool_directory' => $this->tempDir() . '/spool',
+                'local' => ['base_directory' => $this->tempDir() . '/chunks'],
+                ...$config,
+            ],
+        ], $container);
+
+        // The bundle is loaded inside a compiled container in a real
+        // application; instantiating services without compiling trips over the
+        // named-argument defers the PHP-DSL uses for autowired definitions.
+        // Compilation also inlines private services nothing references, so the
+        // pipeline is made public to be reachable from the test.
+        $container->getDefinition(ValidationPipeline::class)->setPublic(true);
+        $container->compile();
+
+        return $container->get(ValidationPipeline::class);
+    }
+
+    /**
+     * @return list<class-string>
+     */
+    private function ruleClasses(ValidationPipeline $pipeline): array
+    {
+        $rules = (new \ReflectionProperty(ValidationPipeline::class, 'rules'))->getValue($pipeline);
+
+        return array_map(static fn (object $rule): string => $rule::class, $rules);
     }
 }

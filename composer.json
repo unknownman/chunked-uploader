@@ -41,7 +41,7 @@
         "ext-redis": "Required for RedisMetadataRepository with native Redis client.",
         "predis/predis": "Alternative Redis client for RedisMetadataRepository.",
         "ext-pdo": "Required for PdoMetadataRepository.",
-        "aws/aws-sdk-php": "Required for S3ChunkStorage.",
+        "aws/aws-sdk-php": "Required for the S3 driver (S3ChunkStorage, S3MultipartAssembler).",
         "league/flysystem": "Required for optional Flysystem storage bridge."
     },
     "autoload": {
