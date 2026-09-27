@@ -80,7 +80,12 @@ final class S3MultipartAssembler implements FileAssemblerInterface
      */
     public function assemble(UploadState $state, ChunkStorageInterface $storage): string
     {
-        if (!$state->hasMultipartUpload()) {
+        // Bound to a local before the check: the SDK's command shape declares
+        // `UploadId` as a non-nullable string, and narrowing a public property
+        // through hasMultipartUpload() is not something the analyser can follow.
+        $uploadId = $state->multipartUploadId;
+
+        if ($uploadId === null || $uploadId === '') {
             throw new AssemblyException(
                 'No S3 multipart upload is in progress for identifier: ' . $state->identifier,
             );
@@ -111,7 +116,7 @@ final class S3MultipartAssembler implements FileAssemblerInterface
             $this->client->completeMultipartUpload([
                 'Bucket' => $this->bucket,
                 'Key' => $key,
-                'UploadId' => $state->multipartUploadId,
+                'UploadId' => $uploadId,
                 'Parts' => $parts,
             ]);
         } catch (AwsException $e) {

@@ -18,6 +18,7 @@ use Resumable\ChunkedUploader\Core\Models\Chunk;
 use Resumable\ChunkedUploader\Core\Models\UploadState;
 use Resumable\ChunkedUploader\Tests\InMemoryMetadataRepository;
 use Resumable\ChunkedUploader\Tests\Support\FakeS3Client;
+use Resumable\ChunkedUploader\Tests\Support\RecordingStreamWrapper;
 use Resumable\ChunkedUploader\Tests\TestCase;
 
 use function stream_get_contents;
@@ -589,6 +590,48 @@ final class S3ChunkStorageTest extends TestCase
         $client->on('createMultipartUpload', static fn (): array => ['UploadId' => 'upload-abc']);
 
         return $client;
+    }
+
+    /**
+     * The digest is decoded while the request payload is being assembled, and
+     * that happens after the chunk's source stream has been opened. If the
+     * payload were built outside the try/finally, the rejection would escape
+     * before the finally and leak the handle — a defect no exception-message
+     * assertion can catch, so the open/close pair is checked directly.
+     */
+    #[Test]
+    public function test_store_closes_the_chunk_stream_when_the_digest_is_rejected(): void
+    {
+        RecordingStreamWrapper::register();
+
+        try {
+            RecordingStreamWrapper::reset();
+
+            $client = $this->clientWithUploadId();
+            $storage = $this->storage($client, $this->readyMetadata('track'));
+
+            $chunk = $this->chunkWithChecksum(
+                RecordingStreamWrapper::SCHEME . '://chunk/0',
+                'not-a-digest',
+            );
+
+            try {
+                $storage->store($chunk);
+                self::fail('Expected the malformed digest to be rejected.');
+            } catch (InvalidChunkException) {
+                // Expected: the digest cannot be used, so no round trip is spent.
+            }
+
+            self::assertGreaterThan(0, RecordingStreamWrapper::$opens, 'driver never opened the source stream');
+            self::assertSame(
+                RecordingStreamWrapper::$opens,
+                RecordingStreamWrapper::$closes,
+                'the source stream was opened but never closed',
+            );
+            self::assertNotContains('uploadPart', $client->commandNames());
+        } finally {
+            RecordingStreamWrapper::unregister();
+        }
     }
 
     private function chunkWithChecksum(string $path, ?string $checksum): Chunk

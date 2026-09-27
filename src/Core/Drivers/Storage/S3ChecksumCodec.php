@@ -60,8 +60,15 @@ final class S3ChecksumCodec
     /**
      * Builds the `uploadPart` parameters that enable native S3 verification.
      *
-     * @return array<string, string> Parameters to merge into the command payload;
-     *                               empty when the client sent no usable digest
+     * The return type is a closed union of constant array shapes rather than
+     * `array<string, string>` on purpose. `S3Client::uploadPart()` declares a
+     * sealed argument shape, so the spread at the call site is only provable when
+     * the keys are known statically. Widening this to a generic map makes the
+     * call unverifiable and pushes the contract back onto a suppression.
+     *
+     * @return array{}|array{ChecksumSHA256: string, ChecksumAlgorithm: 'SHA256'}|array{ContentMD5: string}
+     *         Parameters to merge into the command payload; empty when the
+     *         client sent no usable digest
      *
      * @throws InvalidChunkException when a digest is present but unusable
      */
@@ -91,7 +98,7 @@ final class S3ChecksumCodec
      * `x-amz-checksum-*` header is already present, and naming the algorithm
      * states the wire intent explicitly.
      *
-     * @return array<string, string>
+     * @return array{ChecksumSHA256: string, ChecksumAlgorithm: 'SHA256'}
      */
     private static function sha256Parameters(string $digest): array
     {
@@ -104,7 +111,7 @@ final class S3ChecksumCodec
     /**
      * `ContentMD5` binds to the `Content-MD5` request header.
      *
-     * @return array<string, string>
+     * @return array{ContentMD5: string}
      */
     private static function md5Parameters(string $digest): array
     {

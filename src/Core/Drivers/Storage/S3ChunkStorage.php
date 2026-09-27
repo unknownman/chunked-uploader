@@ -110,7 +110,22 @@ final class S3ChunkStorage implements ChunkStorageInterface
         }
 
         try {
-            $result = $this->client->uploadPart([
+            /**
+             * `uploadPart()` takes a sealed array shape, and a spread collapses the
+             * key/value pairing into one union, leaving the analyser unable to show
+             * that e.g. ContentLength is an int rather than the string the Body
+             * union also permits. Stating the three concrete shapes keeps the
+             * correlation provable; if the SDK adds or retires a key this
+             * annotation is what fails first.
+             *
+             * Built inside the try so that a digest rejected by ChunkChecksum
+             * still unwinds through the finally below and closes $stream.
+             *
+             * @var array{Bucket: string, Key: string, UploadId: string, PartNumber: int, Body: resource, ContentLength: int}
+             *      |array{Bucket: string, Key: string, UploadId: string, PartNumber: int, Body: resource, ContentLength: int, ChecksumSHA256: string, ChecksumAlgorithm: 'SHA256'}
+             *      |array{Bucket: string, Key: string, UploadId: string, PartNumber: int, Body: resource, ContentLength: int, ContentMD5: string}
+             */
+            $args = [
                 'Bucket' => $this->bucket,
                 'Key' => $this->keys->finalKey($state),
                 'UploadId' => $uploadId,
@@ -123,7 +138,9 @@ final class S3ChunkStorage implements ChunkStorageInterface
                 // Empty when the client sent no digest, which leaves the part
                 // unverified exactly as before.
                 ...S3ChecksumCodec::requestParameters($chunk),
-            ]);
+            ];
+
+            $result = $this->client->uploadPart($args);
         } catch (AwsException $e) {
             // A digest failure is a client/data problem, not an infrastructure
             // outage, so it becomes a typed domain error before the generic
