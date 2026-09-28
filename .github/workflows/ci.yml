@@ -114,8 +114,16 @@ jobs:
         # Only the resolved-stable graph is statically analysed; running the
         # analyser four times over a prefer-lowest graph produces duplicate
         # findings for packages that are not the ones we support.
+        #
+        # --memory-limit is stated explicitly rather than inherited from the
+        # runner's php.ini. setup-php happens to set memory_limit=-1 today, but
+        # that is an accident of the image, not a guarantee: with php-parser 5 a
+        # cold-cache analysis overruns the stock 128M default and dies with
+        # "Child process error ... reached configured PHP memory limit", which
+        # reports as a PHPStan error rather than an environment one. A fresh
+        # clone is exactly that cold-cache case, so the budget belongs here.
         if: matrix.dependency-version == 'prefer-stable'
-        run: vendor/bin/phpstan analyse --configuration=phpstan.neon --no-progress
+        run: vendor/bin/phpstan analyse --configuration=phpstan.neon --no-progress --memory-limit=1G
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always

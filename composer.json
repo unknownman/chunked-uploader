@@ -74,6 +74,17 @@
             "php": "8.2.0"
         }
     },
+    "scripts": {
+        "analyse": "phpstan analyse --configuration=phpstan.neon --no-progress --memory-limit=1G",
+        "lint": "phpcs",
+        "test": "phpunit --no-coverage",
+        "check": [
+            "@composer validate --strict",
+            "@lint",
+            "@analyse",
+            "@test"
+        ]
+    },
     "minimum-stability": "stable",
     "prefer-stable": true
 }
